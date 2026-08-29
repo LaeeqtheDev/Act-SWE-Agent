@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { Incident, IncidentEvent } from "@sentinelops/types";
 
@@ -16,11 +17,21 @@ const severityVariant: Record<string, "default" | "secondary" | "destructive" | 
 export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[]; apiUrl: string }) {
   const [selected, setSelected] = useState<Incident | null>(null);
   const [events, setEvents] = useState<IncidentEvent[]>([]);
+  const [resolving, setResolving] = useState(false);
 
   async function openIncident(incident: Incident) {
     setSelected(incident);
     const res = await fetch(`${apiUrl}/incidents/${incident.id}/events`);
     setEvents(await res.json());
+  }
+
+  async function resolveIncident() {
+    if (!selected) return;
+    setResolving(true);
+    await fetch(`${apiUrl}/incidents/${selected.id}/resolve`, { method: "POST" });
+    setResolving(false);
+    setSelected(null);
+    window.location.reload();
   }
 
   return (
@@ -66,6 +77,11 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
                   <p className="text-sm text-muted-foreground">No timeline events recorded.</p>
                 )}
               </div>
+              {selected.status !== "resolved" && (
+                <Button onClick={resolveIncident} disabled={resolving} className="mt-4">
+                  {resolving ? "Resolving..." : "Mark Resolved"}
+                </Button>
+              )}
             </>
           )}
         </DialogContent>
