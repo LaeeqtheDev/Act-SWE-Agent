@@ -1,11 +1,8 @@
-"use client";
-
-import { useState } from "react";
-import { mockServices, mockIncidents, mockEvents } from "@/lib/mock-data";
+import { IncidentsSection } from "@/components/incidents-section";
 import { Card, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { Incident } from "@sentinelops/types";
+import type { Service, Incident } from "@sentinelops/types";
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 const statusColor: Record<string, string> = {
   healthy: "bg-green-600",
@@ -13,20 +10,18 @@ const statusColor: Record<string, string> = {
   down: "bg-red-600",
 };
 
-const severityVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
-  low: "secondary",
-  medium: "default",
-  high: "destructive",
-  critical: "destructive",
-};
+async function getServices(): Promise<Service[]> {
+  const res = await fetch(`${API_URL}/services`, { cache: "no-store" });
+  return res.json();
+}
 
-export default function Home() {
-  const [selected, setSelected] = useState<Incident | null>(null);
+async function getIncidents(): Promise<Incident[]> {
+  const res = await fetch(`${API_URL}/incidents`, { cache: "no-store" });
+  return res.json();
+}
 
-  const timelineFor = (incidentId: string) =>
-    mockEvents
-      .filter((e) => e.incidentId === incidentId)
-      .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+export default async function Home() {
+  const [services, incidents] = await Promise.all([getServices(), getIncidents()]);
 
   return (
     <main className="p-8 space-y-10 max-w-4xl mx-auto">
@@ -35,7 +30,7 @@ export default function Home() {
       <section>
         <h2 className="text-lg font-semibold mb-3">Services</h2>
         <div className="grid grid-cols-2 gap-4">
-          {mockServices.map((service) => (
+          {services.map((service) => (
             <Card key={service.id}>
               <CardContent className="flex justify-between items-center p-4">
                 <span className="font-medium">{service.name}</span>
@@ -49,55 +44,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section>
-        <h2 className="text-lg font-semibold mb-3">Incidents</h2>
-        <div className="space-y-3">
-          {mockIncidents.map((incident) => (
-            <Card
-              key={incident.id}
-              className="cursor-pointer hover:border-foreground/30 transition-colors"
-              onClick={() => setSelected(incident)}
-            >
-              <CardContent className="flex justify-between items-center p-4">
-                <span>
-                  <span className="text-muted-foreground">{incident.id}</span> — {incident.title}
-                </span>
-                <div className="flex gap-2 items-center">
-                  <Badge variant={severityVariant[incident.severity]}>{incident.severity}</Badge>
-                  <span className="text-sm text-muted-foreground uppercase">{incident.status}</span>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-      </section>
-
-      <Dialog open={!!selected} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogContent>
-          {selected && (
-            <>
-              <DialogHeader>
-                <DialogTitle>
-                  {selected.id} — {selected.title}
-                </DialogTitle>
-              </DialogHeader>
-              <div className="space-y-3 mt-2">
-                {timelineFor(selected.id).map((event) => (
-                  <div key={event.id} className="flex gap-3 text-sm">
-                    <span className="text-muted-foreground w-20 shrink-0">
-                      {new Date(event.timestamp).toLocaleTimeString()}
-                    </span>
-                    <span>{event.message}</span>
-                  </div>
-                ))}
-                {timelineFor(selected.id).length === 0 && (
-                  <p className="text-sm text-muted-foreground">No timeline events recorded.</p>
-                )}
-              </div>
-            </>
-          )}
-        </DialogContent>
-      </Dialog>
+      <IncidentsSection incidents={incidents} apiUrl={API_URL} />
     </main>
   );
 }
