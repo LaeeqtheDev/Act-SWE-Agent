@@ -1,9 +1,10 @@
 import { mockServices, mockIncidents } from "@/lib/mock-data";
+import type { Service } from "@sentinelops/types";
 
 export default function Home() {
   return (
     <main className="p-8 space-y-8">
-      <h1 className="text-2xl font-bold">SentinelOps</h1>
+      <h1 className="text-2xl font-bold">Act</h1>
 
       <section>
         <h2 className="text-lg font-semibold mb-3">Services</h2>
