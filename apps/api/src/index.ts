@@ -96,6 +96,74 @@ app.post("/simulate/database-overload", async (req, res) => {
   res.json({ triggeredEvents: rawEvents.length, incidentCreated: !!incident, incident });
 });
 
+app.post("/simulate/pod-crash-loop", async (req, res) => {
+  const { serviceName = "auth-api" } = req.body ?? {};
+
+  const service = await prisma.service.findFirst({ where: { name: serviceName } });
+  if (!service) {
+    return res.status(404).json({ error: `Service '${serviceName}' not found` });
+  }
+
+  const rawEvents = [
+    { type: "pod_restart", message: `${service.name} pod entered CrashLoopBackOff` },
+    { type: "pod_restart", message: `${service.name} pod restarted (attempt 2)` },
+    { type: "pod_restart", message: `${service.name} pod restarted (attempt 3)` },
+  ];
+
+  for (const e of rawEvents) {
+    await prisma.event.create({
+      data: { serviceId: service.id, type: e.type, message: e.message },
+    });
+  }
+
+  await prisma.service.update({ where: { id: service.id }, data: { status: "degraded" } });
+
+  const recentRestarts = await prisma.event.count({
+    where: {
+      serviceId: service.id,
+      type: "pod_restart",
+      timestamp: { gte: new Date(Date.now() - 60_000) },
+    },
+  });
+
+  let incident = null;
+  if (recentRestarts >= 3) {
+    incident = await prisma.incident.create({
+      data: {
+        serviceId: service.id,
+        title: "Pod crash loop",
+        severity: "medium",
+        status: "investigating",
+      },
+    });
+
+    await prisma.incidentEvent.createMany({
+      data: rawEvents.map((e) => ({ incidentId: incident!.id, message: e.message })),
+    });
+  }
+
+  res.json({ triggeredEvents: rawEvents.length, incidentCreated: !!incident, incident });
+});
+
+
+app.post("/incidents/:id/resolve", async (req, res) => {
+  const incident = await prisma.incident.update({
+    where: { id: req.params.id },
+    data: { status: "resolved", resolvedAt: new Date() },
+  });
+
+  await prisma.service.update({
+    where: { id: incident.serviceId },
+    data: { status: "healthy" },
+  });
+
+  await prisma.incidentEvent.create({
+    data: { incidentId: incident.id, message: "Incident marked resolved" },
+  });
+
+  res.json(incident);
+});
+
 app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
 });
