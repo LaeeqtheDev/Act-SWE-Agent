@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import { PrismaClient } from "@prisma/client";
+import { eventQueue } from "./queue.js";
 
 const app = express();
 const prisma = new PrismaClient();
@@ -43,7 +44,6 @@ app.post("/simulate/database-overload", async (req, res) => {
     return res.status(404).json({ error: `Service '${serviceName}' not found` });
   }
 
-  // Simulate a burst of raw events, spaced a few seconds apart
   const rawEvents = [
     { type: "deployment", message: "Deployment v43 started" },
     { type: "db_connections", message: "Database connections +38%" },
@@ -51,49 +51,18 @@ app.post("/simulate/database-overload", async (req, res) => {
     { type: "error_rate", message: "5xx rate exceeds threshold" },
   ];
 
+  // Push each event onto the queue instead of writing directly to the DB.
+  // A separate worker process picks these up and processes them.
   for (const e of rawEvents) {
-    await prisma.event.create({
-      data: { serviceId: service.id, type: e.type, message: e.message },
-    });
-  }
-
-  await prisma.service.update({
-    where: { id: service.id },
-    data: { status: "degraded" },
-  });
-
-  // --- Rule-based detection ---
-  // Rule: if a service has both a "db_connections" and "error_rate" event
-  // within the last 60 seconds, open a HIGH incident.
-  const recentEvents = await prisma.event.findMany({
-    where: {
+    await eventQueue.add("service-event", {
       serviceId: service.id,
-      timestamp: { gte: new Date(Date.now() - 60_000) },
-    },
-  });
-
-  const hasDbSpike = recentEvents.some((e) => e.type === "db_connections");
-  const hasErrorSpike = recentEvents.some((e) => e.type === "error_rate");
-
-  let incident = null;
-  if (hasDbSpike && hasErrorSpike) {
-    incident = await prisma.incident.create({
-      data: {
-        serviceId: service.id,
-        title: "Database connection exhaustion",
-        severity: "high",
-        status: "investigating",
-        errorRate: 18.4,
-      },
-    });
-
-    // Copy the raw events into the incident's timeline
-    await prisma.incidentEvent.createMany({
-      data: rawEvents.map((e) => ({ incidentId: incident!.id, message: e.message })),
+      serviceName: service.name,
+      type: e.type,
+      message: e.message,
     });
   }
 
-  res.json({ triggeredEvents: rawEvents.length, incidentCreated: !!incident, incident });
+  res.json({ queued: rawEvents.length, serviceId: service.id });
 });
 
 app.post("/simulate/pod-crash-loop", async (req, res) => {
@@ -144,7 +113,6 @@ app.post("/simulate/pod-crash-loop", async (req, res) => {
 
   res.json({ triggeredEvents: rawEvents.length, incidentCreated: !!incident, incident });
 });
-
 
 app.post("/incidents/:id/resolve", async (req, res) => {
   const incident = await prisma.incident.update({

@@ -10,6 +10,11 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
   api:
     build:
       context: .
@@ -18,8 +23,10 @@ services:
       - "4000:4000"
     environment:
       DATABASE_URL: postgresql://postgres:devpassword@postgres:5432/sentinelops?schema=public
+      REDIS_HOST: redis
     depends_on:
       - postgres
+      - redis
     volumes:
       - ./apps/api/src:/app/apps/api/src
 
