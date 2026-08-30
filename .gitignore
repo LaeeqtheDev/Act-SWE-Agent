@@ -27,6 +27,9 @@ out/
 build
 dist
 
+# Docker build artifacts
+*.tar
+*.tar.gz
 
 # Debug
 npm-debug.log*
