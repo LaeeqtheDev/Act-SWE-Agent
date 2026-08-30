@@ -1,14 +1,12 @@
-# SentinelOps
+# Act-SWE-Agent
 
 **AI-powered incident response & cloud operations platform** — a miniature, self-built version of the Datadog + PagerDuty + AI-SRE-agent stack, built to demonstrate full-stack, distributed-systems, and cloud-native engineering in one project.
-
-> Built in a single overnight session (9 PM–6 AM) by an engineer with 7 years of professional software experience, deliberately used to get hands-on with Docker, Kubernetes, and AI-agent architecture — areas that hadn't come up day-to-day but are increasingly expected across modern full-stack and platform roles.
 
 ---
 
 ## What it does
 
-SentinelOps simulates a small fleet of microservices (`payments-api`, `orders-api`, `auth-api`, `notification-api`) and gives you the tools to:
+Act-SWE-Agent simulates a small fleet of microservices (`payments-api`, `orders-api`, `auth-api`, `notification-api`) and gives you the tools to:
 
 1. **Trigger a realistic failure** — a simulator endpoint fakes a database-connection-exhaustion or pod-crash-loop scenario, emitting a burst of timestamped events, just like real infrastructure telemetry would.
 2. **Detect it automatically** — a background worker consumes those events off a queue and applies threshold/pattern-based rules to decide whether they add up to a real incident.
@@ -44,7 +42,7 @@ Background Worker ──► Rule-based Detection ──► Incident + Timeline
 ## Monorepo layout
 
 ```
-sentinelops/
+act-swe-agent/
 ├── apps/
 │   ├── web/          # Next.js dashboard
 │   └── api/           # Express API + BullMQ worker
@@ -85,7 +83,7 @@ Managed with **Turborepo + pnpm workspaces**, so the frontend and backend share 
 
 ## In progress / known limitations
 
-This project was built to prioritize *breadth of real, working infrastructure* over polishing every corner. A few things are intentionally left as next steps rather than finished tonight:
+This project prioritizes *breadth of real, working infrastructure* over polishing every corner. A few things are intentionally left as next steps:
 
 - **Kubernetes networking fix pending:** the deployed `payments-api` pod needs its Redis connection env var wired through correctly inside the cluster — the deployment mechanism and self-healing are proven, this is a small remaining configuration detail.
 - Only `payments-api` is deployed to Kubernetes so far; the pattern is proven and repeatable for the other three services.
@@ -146,9 +144,3 @@ curl -X POST http://localhost:4000/simulate/database-overload \
 ```
 
 Refresh the dashboard to watch the incident appear.
-
----
-
-## Why this project
-
-Real interview conversations about "have you worked with Kubernetes?" or "tell me about an event-driven system you built" are a lot more convincing backed by something you can actually walk through — the architecture decisions, the failure modes you hit, and how you debugged them — than a line on a CV. This project exists to make those conversations concrete.
