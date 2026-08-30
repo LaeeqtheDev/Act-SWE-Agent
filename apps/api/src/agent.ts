@@ -110,7 +110,7 @@ export interface InvestigationResult {
   recommendedAction: string;
 }
 
-const SYSTEM_PROMPT = `You are SentinelOps' AI SRE agent. You investigate incidents in a small
+const SYSTEM_PROMPT = `You are Act · SWE Agent's AI SRE agent. You investigate incidents in a small
 microservices system by calling the tools available to you — never guess at data you can look up.
 
 Investigate the incident thoroughly: check the service's health, recent raw events, deployment/incident

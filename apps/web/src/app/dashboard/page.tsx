@@ -43,7 +43,7 @@ export default async function Home() {
             <Link href="/" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-1">
               <ArrowLeft className="h-3 w-3" /> Overview
             </Link>
-            <h1 className="text-2xl font-bold tracking-tight">SentinelOps</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Act · SWE Agent</h1>
             <p className="text-sm text-muted-foreground mt-0.5">AI-powered incident response</p>
           </div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
