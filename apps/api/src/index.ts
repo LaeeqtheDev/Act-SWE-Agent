@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 import { eventQueue } from "./queue.js";
+import { investigateIncident, performAction } from "./agent.js";
 
 const app = express();
 const prisma = new PrismaClient();
@@ -130,6 +131,81 @@ app.post("/incidents/:id/resolve", async (req, res) => {
   });
 
   res.json(incident);
+});
+
+// --- Sprint 7: AI Agent ---
+// Read-only investigation. Calls out to Anthropic with a fixed tool menu
+// (DB + best-effort Kubernetes), then stores the structured result as an
+// AgentAction of type "investigation" so it's visible in the incident's history.
+
+app.post("/incidents/:id/investigate", async (req, res) => {
+  try {
+    const result = await investigateIncident(req.params.id);
+
+    const action = await prisma.agentAction.create({
+      data: {
+        incidentId: req.params.id,
+        type: "investigation",
+        status: "completed",
+        summary: result.summary,
+        confidence: result.confidence,
+        evidence: { probableCause: result.probableCause, evidence: result.evidence, recommendedAction: result.recommendedAction },
+        resolvedAt: new Date(),
+      },
+    });
+
+    await prisma.incidentEvent.create({
+      data: { incidentId: req.params.id, message: `AI investigation: ${result.probableCause}` },
+    });
+
+    res.json({ ...result, actionId: action.id });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "investigation failed" });
+  }
+});
+
+app.get("/incidents/:id/actions", async (req, res) => {
+  const actions = await prisma.agentAction.findMany({
+    where: { incidentId: req.params.id },
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(actions);
+});
+
+// --- Sprint 8: Permission layer ---
+// The agent can only *propose* a write action (rollback, restart_pod, scale).
+// Nothing executes until a human explicitly approves it here — this is the
+// "AI Agent -> Permission Layer -> read ✓ / write ? approval" gate from the plan.
+
+app.post("/incidents/:id/actions", async (req, res) => {
+  const { type = "restart_pod", summary } = req.body ?? {};
+  const action = await prisma.agentAction.create({
+    data: {
+      incidentId: req.params.id,
+      type,
+      status: "pending",
+      summary: summary ?? `Proposed action: ${type}`,
+    },
+  });
+  res.json(action);
+});
+
+app.post("/actions/:id/approve", async (req, res) => {
+  try {
+    await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "approved" } });
+    const result = await performAction(req.params.id);
+    res.json({ approved: true, result });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "approval failed" });
+  }
+});
+
+app.post("/actions/:id/reject", async (req, res) => {
+  const action = await prisma.agentAction.update({
+    where: { id: req.params.id },
+    data: { status: "rejected", resolvedAt: new Date() },
+  });
+  res.json(action);
 });
 
 app.listen(PORT, () => {

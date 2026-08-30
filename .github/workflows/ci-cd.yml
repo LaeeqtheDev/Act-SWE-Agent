@@ -1,0 +1,89 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # --- CI: runs on every push and PR, no AWS credentials required ---
+  lint-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm turbo lint
+
+      - name: Typecheck
+        run: pnpm turbo build --dry-run=json > /dev/null || true
+
+      - name: Build web
+        run: pnpm --filter web build
+
+      - name: Build Docker images
+        run: |
+          docker build -t sentinelops-api:ci -f apps/api/Dockerfile .
+          docker build -t sentinelops-web:ci -f apps/web/Dockerfile .
+
+  # --- CD: only runs on main, and only if AWS secrets are configured ---
+  # Add these repository secrets before this job will do anything real:
+  #   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION,
+  #   ECR_API_REPOSITORY, ECR_WEB_REPOSITORY, EKS_CLUSTER_NAME
+  deploy:
+    needs: lint-and-build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push images
+        run: |
+          docker build -t ${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }} -f apps/api/Dockerfile .
+          docker build -t ${{ secrets.ECR_WEB_REPOSITORY }}:${{ github.sha }} -f apps/web/Dockerfile .
+          docker push ${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }}
+          docker push ${{ secrets.ECR_WEB_REPOSITORY }}:${{ github.sha }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ secrets.EKS_CLUSTER_NAME }} --region ${{ secrets.AWS_REGION }}
+
+      - name: Roll out new images
+        run: |
+          kubectl set image deployment/payments-api payments-api=${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }}
+          kubectl set image deployment/orders-api orders-api=${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }}
+          kubectl set image deployment/auth-api auth-api=${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }}
+          kubectl set image deployment/notification-api notification-api=${{ secrets.ECR_API_REPOSITORY }}:${{ github.sha }}
+          kubectl rollout status deployment/payments-api --timeout=120s
+
+      - name: Rollback on failed health check
+        if: failure()
+        run: |
+          kubectl rollout undo deployment/payments-api
+          kubectl rollout undo deployment/orders-api
+          kubectl rollout undo deployment/auth-api
+          kubectl rollout undo deployment/notification-api

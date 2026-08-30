@@ -29,8 +29,8 @@ const worker = new Worker(
       },
     });
 
-    const hasDbSpike = recentEvents.some((e) => e.type === "db_connections");
-    const hasErrorSpike = recentEvents.some((e) => e.type === "error_rate");
+    const hasDbSpike = recentEvents.some((e: { type: string }) => e.type === "db_connections");
+    const hasErrorSpike = recentEvents.some((e: { type: string }) => e.type === "error_rate");
 
     if (hasDbSpike && hasErrorSpike) {
       const existingOpenIncident = await prisma.incident.findFirst({
@@ -49,7 +49,7 @@ const worker = new Worker(
         });
 
         await prisma.incidentEvent.createMany({
-          data: recentEvents.map((e) => ({ incidentId: incident.id, message: e.message })),
+          data: recentEvents.map((e: { message: string }) => ({ incidentId: incident.id, message: e.message })),
         });
 
         console.log(`[worker] incident created: ${incident.id} for ${serviceName}`);

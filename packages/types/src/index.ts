@@ -35,3 +35,17 @@ export interface IncidentEvent {
   message: string;
   timestamp: string;
 }
+export type AgentActionType = "investigation" | "rollback" | "restart_pod" | "scale";
+export type AgentActionStatus = "pending" | "approved" | "rejected" | "completed";
+
+export interface AgentAction {
+  id: string;
+  incidentId: string;
+  type: AgentActionType;
+  status: AgentActionStatus;
+  summary?: string;
+  confidence?: number;
+  evidence?: unknown;
+  createdAt: string;
+  resolvedAt?: string;
+}

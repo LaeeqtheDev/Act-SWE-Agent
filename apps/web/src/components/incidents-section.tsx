@@ -5,7 +5,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Clock, ChevronRight } from "lucide-react";
+import { Clock, ChevronRight, Bot, Loader2 } from "lucide-react";
 import type { Incident, IncidentEvent } from "@sentinelops/types";
 
 const severityVariant: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
@@ -22,13 +22,24 @@ const severityBorder: Record<string, string> = {
   critical: "border-l-red-600",
 };
 
+interface InvestigationResult {
+  summary: string;
+  probableCause: string;
+  confidence: number;
+  evidence: string[];
+  recommendedAction: string;
+}
+
 export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[]; apiUrl: string }) {
   const [selected, setSelected] = useState<Incident | null>(null);
   const [events, setEvents] = useState<IncidentEvent[]>([]);
   const [resolving, setResolving] = useState(false);
+  const [investigating, setInvestigating] = useState(false);
+  const [investigation, setInvestigation] = useState<InvestigationResult | null>(null);
 
   async function openIncident(incident: Incident) {
     setSelected(incident);
+    setInvestigation(null);
     const res = await fetch(`${apiUrl}/incidents/${incident.id}/events`);
     setEvents(await res.json());
   }
@@ -40,6 +51,22 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
     setResolving(false);
     setSelected(null);
     window.location.reload();
+  }
+
+  // Sprint 7: ask the AI agent to investigate the incident. This calls the
+  // real tool-calling loop on the backend (getServiceHealth, getRecentErrors,
+  // getDeploymentHistory, and — if a cluster is reachable — live K8s data)
+  // and renders back a structured root-cause report.
+  async function investigate() {
+    if (!selected) return;
+    setInvestigating(true);
+    try {
+      const res = await fetch(`${apiUrl}/incidents/${selected.id}/investigate`, { method: "POST" });
+      const result = await res.json();
+      setInvestigation(result);
+    } finally {
+      setInvestigating(false);
+    }
   }
 
   return (
@@ -77,7 +104,7 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
                 <DialogTitle>{selected.title}</DialogTitle>
               </DialogHeader>
               <div className="space-y-1 mt-2">
-                {events.map((event, i) => (
+                {events.map((event) => (
                   <div key={event.id} className="flex gap-3 text-sm py-2 border-l-2 border-muted pl-3 relative">
                     <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0 mt-0.5" />
                     <div>
@@ -92,11 +119,47 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
                   <p className="text-sm text-muted-foreground">No timeline events recorded.</p>
                 )}
               </div>
-              {selected.status !== "resolved" && (
-                <Button onClick={resolveIncident} disabled={resolving} className="mt-4">
-                  {resolving ? "Resolving..." : "Mark Resolved"}
-                </Button>
+
+              {investigation && (
+                <div className="mt-4 rounded-lg border bg-muted/40 p-4 space-y-2 text-sm">
+                  <div className="flex items-center gap-2 font-medium">
+                    <Bot className="h-4 w-4" />
+                    AI investigation
+                    <Badge variant="outline" className="ml-auto">
+                      {Math.round(investigation.confidence * 100)}% confidence
+                    </Badge>
+                  </div>
+                  <p className="text-muted-foreground">{investigation.summary}</p>
+                  <p><span className="font-medium">Probable cause: </span>{investigation.probableCause}</p>
+                  {investigation.evidence.length > 0 && (
+                    <ul className="list-disc pl-5 text-muted-foreground space-y-0.5">
+                      {investigation.evidence.map((e, i) => (
+                        <li key={i}>{e}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <p><span className="font-medium">Recommended action: </span>{investigation.recommendedAction}</p>
+                </div>
               )}
+
+              <div className="flex gap-2 mt-4">
+                <Button variant="outline" onClick={investigate} disabled={investigating}>
+                  {investigating ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" /> Investigating...
+                    </>
+                  ) : (
+                    <>
+                      <Bot className="h-4 w-4 mr-2" /> Investigate with AI
+                    </>
+                  )}
+                </Button>
+                {selected.status !== "resolved" && (
+                  <Button onClick={resolveIncident} disabled={resolving}>
+                    {resolving ? "Resolving..." : "Mark Resolved"}
+                  </Button>
+                )}
+              </div>
             </>
           )}
         </DialogContent>

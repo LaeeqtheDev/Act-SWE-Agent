@@ -30,6 +30,20 @@ model Incident {
   resolvedAt  DateTime?
 
   events IncidentEvent[]
+  agentActions AgentAction[]
+}
+
+model AgentAction {
+  id         String    @id @default(uuid())
+  incidentId String
+  incident   Incident  @relation(fields: [incidentId], references: [id])
+  type       String    @default("investigation") // investigation | rollback | restart_pod | scale
+  status     String    @default("pending")        // pending | approved | rejected | completed
+  summary    String?
+  confidence Float?
+  evidence   Json?
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
 }
 
 model IncidentEvent {

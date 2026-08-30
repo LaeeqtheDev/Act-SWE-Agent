@@ -24,6 +24,25 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:devpassword@postgres:5432/sentinelops?schema=public
       REDIS_HOST: redis
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./apps/api/src:/app/apps/api/src
+
+  # Sprint 4: the BullMQ worker as its own always-on container, separate from
+  # the API process -- this is what makes event processing genuinely
+  # asynchronous instead of just "a function the API also happens to run."
+  worker:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["node_modules/.bin/tsx", "src/worker.ts"]
+    environment:
+      DATABASE_URL: postgresql://postgres:devpassword@postgres:5432/sentinelops?schema=public
+      REDIS_HOST: redis
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     depends_on:
       - postgres
       - redis
@@ -44,5 +63,37 @@ services:
     volumes:
       - ./apps/web/src:/app/apps/web/src
 
+  # --- Sprint 11: Observability (optional) ---
+  # Not started by a plain `docker compose up`. Run with:
+  #   docker compose --profile observability up
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    profiles: ["observability"]
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./observability/otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+
 volumes:
   postgres-data:
+  grafana-data:
