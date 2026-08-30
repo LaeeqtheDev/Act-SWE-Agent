@@ -28,6 +28,7 @@ interface InvestigationResult {
   confidence: number;
   evidence: string[];
   recommendedAction: string;
+  provider?: string;
 }
 
 export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[]; apiUrl: string }) {
@@ -125,6 +126,9 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
                   <div className="flex items-center gap-2 font-medium">
                     <Bot className="h-4 w-4" />
                     AI investigation
+                    {investigation.provider && (
+                      <span className="text-xs font-mono text-muted-foreground">{investigation.provider}</span>
+                    )}
                     <Badge variant="outline" className="ml-auto">
                       {Math.round(investigation.confidence * 100)}% confidence
                     </Badge>

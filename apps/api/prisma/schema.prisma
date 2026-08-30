@@ -35,15 +35,46 @@ model Incident {
 
 model AgentAction {
   id         String    @id @default(uuid())
-  incidentId String
-  incident   Incident  @relation(fields: [incidentId], references: [id])
-  type       String    @default("investigation") // investigation | rollback | restart_pod | scale
+  incidentId String?
+  incident   Incident? @relation(fields: [incidentId], references: [id])
+  type       String    @default("investigation") // investigation | rollback | restart_pod | scale | browser_action | file_edit | shell_command | web_search
   status     String    @default("pending")        // pending | approved | rejected | completed
   summary    String?
   confidence Float?
   evidence   Json?
   createdAt  DateTime  @default(now())
   resolvedAt DateTime?
+}
+
+// A single active AI provider configuration, editable from the settings UI
+// instead of only via .env. apiKeyEnc is AES-256-GCM ciphertext (base64) —
+// SETTINGS_ENCRYPTION_KEY (server-side only) is required to decrypt it, and
+// the plaintext key is never sent back to the frontend after it's saved.
+model ProviderConfig {
+  id        String   @id @default("active")
+  provider  String
+  model     String
+  apiKeyEnc String?
+  updatedAt DateTime @updatedAt
+}
+
+model Conversation {
+  id        String        @id @default(uuid())
+  title     String?
+  createdAt DateTime      @default(now())
+  messages  ChatMessage[]
+}
+
+model ChatMessage {
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id])
+  role           String       // user | assistant | tool
+  content        String
+  toolName       String?
+  toolCallId     String?
+  toolCalls      Json?
+  createdAt      DateTime     @default(now())
 }
 
 model IncidentEvent {

@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { IncidentsSection } from "@/components/incidents-section";
+import { AgentActivity } from "@/components/agent-activity";
 import { Card, CardContent } from "@/components/ui/card";
-import { Activity, AlertTriangle, CheckCircle2, Server, ArrowLeft } from "lucide-react";
+import { Bot, ArrowLeft, Sparkles, ShieldAlert, CircleCheck, Clock } from "lucide-react";
 import type { Service, Incident } from "@sentinelops/types";
 
 const API_URL = process.env.API_URL_INTERNAL || "http://localhost:4000";
@@ -11,6 +12,12 @@ const statusColor: Record<string, string> = {
   degraded: "bg-amber-500",
   down: "bg-red-500",
 };
+
+interface ActionRow {
+  id: string;
+  incidentId: string | null;
+  status: string;
+}
 
 async function getServices(): Promise<Service[]> {
   const res = await fetch(`${API_URL}/services`, { cache: "no-store" });
@@ -22,17 +29,30 @@ async function getIncidents(): Promise<Incident[]> {
   return res.json();
 }
 
-export default async function Home() {
-  const [services, incidents] = await Promise.all([getServices(), getIncidents()]);
+async function getActions(): Promise<ActionRow[]> {
+  const res = await fetch(`${API_URL}/actions`, { cache: "no-store" });
+  return res.json();
+}
 
-  const openIncidents = incidents.filter((i) => i.status !== "resolved").length;
-  const degradedServices = services.filter((s) => s.status !== "healthy").length;
+export default async function DashboardPage() {
+  const [services, incidents, actions] = await Promise.all([getServices(), getIncidents(), getActions()]);
+  const publicApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+
+  // Every real distinction below comes straight from the data: an incident
+  // has an AgentAction attached only if the agent (chat or an "Investigate")
+  // actually touched it. No AgentAction means Kubernetes' own self-healing
+  // and the detection rules handled it end to end, with no agent involved.
+  const incidentIdsTouchedByAgent = new Set(actions.map((a) => a.incidentId).filter(Boolean));
+  const selfHealed = incidents.filter((i) => i.status === "resolved" && !incidentIdsTouchedByAgent.has(i.id)).length;
+  const agentHandled = incidents.filter((i) => incidentIdsTouchedByAgent.has(i.id)).length;
+  const needsAttention = incidents.filter((i) => i.status !== "resolved" && !incidentIdsTouchedByAgent.has(i.id)).length;
+  const pendingApproval = actions.filter((a) => a.status === "pending").length;
 
   const stats = [
-    { label: "Services", value: services.length, icon: Server, tone: "text-foreground" },
-    { label: "Degraded", value: degradedServices, icon: AlertTriangle, tone: degradedServices > 0 ? "text-amber-500" : "text-muted-foreground" },
-    { label: "Open Incidents", value: openIncidents, icon: Activity, tone: openIncidents > 0 ? "text-red-500" : "text-muted-foreground" },
-    { label: "Resolved Today", value: incidents.length - openIncidents, icon: CheckCircle2, tone: "text-green-500" },
+    { label: "Self-healed (no agent needed)", value: selfHealed, icon: Sparkles, tone: "text-muted-foreground" },
+    { label: "Agent handled", value: agentHandled, icon: Bot, tone: "text-cyan-500" },
+    { label: "Needs agent attention", value: needsAttention, icon: ShieldAlert, tone: needsAttention > 0 ? "text-red-500" : "text-muted-foreground" },
+    { label: "Awaiting your approval", value: pendingApproval, icon: Clock, tone: pendingApproval > 0 ? "text-amber-500" : "text-muted-foreground" },
   ];
 
   return (
@@ -40,11 +60,11 @@ export default async function Home() {
       <div className="border-b">
         <div className="max-w-5xl mx-auto px-8 py-6 flex items-center justify-between">
           <div>
-            <Link href="/" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-1">
-              <ArrowLeft className="h-3 w-3" /> Overview
+            <Link href="/agent" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-1">
+              <ArrowLeft className="h-3 w-3" /> Back to chat
             </Link>
-            <h1 className="text-2xl font-bold tracking-tight">Act · SWE Agent</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">AI-powered incident response</p>
+            <h1 className="text-2xl font-bold tracking-tight">Operations</h1>
+            <p className="text-sm text-muted-foreground mt-0.5">What Kubernetes handled on its own, and what needed the agent</p>
           </div>
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
@@ -57,16 +77,28 @@ export default async function Home() {
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {stats.map((stat) => (
             <Card key={stat.label}>
-              <CardContent className="p-4 flex items-center justify-between">
-                <div>
-                  <p className="text-xs text-muted-foreground">{stat.label}</p>
-                  <p className="text-2xl font-semibold mt-1">{stat.value}</p>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-2xl font-semibold">{stat.value}</p>
+                  <stat.icon className={`h-4 w-4 ${stat.tone}`} />
                 </div>
-                <stat.icon className={`h-5 w-5 ${stat.tone}`} />
+                <p className="text-xs text-muted-foreground leading-snug">{stat.label}</p>
               </CardContent>
             </Card>
           ))}
         </div>
+
+        <section>
+          <div className="flex items-center gap-2 mb-3">
+            <Bot className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-lg font-semibold">Agent activity</h2>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Everything the agent has proposed or done — from chat or from investigating an incident below.
+            Anything pending needs your approval before it runs.
+          </p>
+          <AgentActivity apiUrl={publicApiUrl} />
+        </section>
 
         <section>
           <h2 className="text-lg font-semibold mb-3">Services</h2>
@@ -85,7 +117,16 @@ export default async function Home() {
           </div>
         </section>
 
-        <IncidentsSection incidents={incidents} apiUrl={process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000"} />
+        <section>
+          <div className="flex items-center gap-2 mb-1">
+            <CircleCheck className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-lg font-semibold">Incident timeline</h2>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Every detected incident, whether Kubernetes' own self-healing closed it out or the agent got involved.
+          </p>
+          <IncidentsSection incidents={incidents} apiUrl={publicApiUrl} />
+        </section>
       </div>
     </main>
   );

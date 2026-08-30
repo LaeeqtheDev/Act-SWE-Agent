@@ -3,6 +3,9 @@ import cors from "cors";
 import { PrismaClient } from "@prisma/client";
 import { eventQueue } from "./queue.js";
 import { investigateIncident, performAction } from "./agent.js";
+import { getProvider, OPENAI_COMPATIBLE_PRESETS, ANTHROPIC_MODELS } from "./providers/index.js";
+import { createConversation, listConversations, getConversationMessages, sendMessage, renameConversation, deleteConversation, deleteEmptyConversations } from "./chat.js";
+import { getProviderSettings, saveProviderSettings } from "./settings.js";
 
 const app = express();
 const prisma = new PrismaClient();
@@ -10,6 +13,43 @@ const PORT = 4000;
 
 app.use(cors());
 app.use(express.json());
+
+app.get("/ai/status", async (req, res) => {
+  const provider = await getProvider();
+  res.json(
+    provider
+      ? { configured: true, provider: provider.name, model: provider.model }
+      : { configured: false }
+  );
+});
+
+// --- Settings: model provider + BYOK, entered from the UI ---
+// GET returns only a masked key preview, never the real one. POST accepts a
+// plaintext key over HTTPS in the request body (same trust boundary as
+// entering it into any settings form) and stores it encrypted — see settings.ts.
+
+app.get("/settings/provider", async (req, res) => {
+  const settings = await getProviderSettings();
+  res.json({
+    settings,
+    catalog: {
+      anthropic: { models: ANTHROPIC_MODELS },
+      ...Object.fromEntries(Object.entries(OPENAI_COMPATIBLE_PRESETS).map(([k, v]) => [k, { models: v.models }])),
+    },
+  });
+});
+
+app.post("/settings/provider", async (req, res) => {
+  const { provider, model, apiKey } = req.body ?? {};
+  if (!provider || !model) return res.status(400).json({ error: "provider and model are required" });
+  try {
+    await saveProviderSettings({ provider, model, apiKey });
+    const settings = await getProviderSettings();
+    res.json({ saved: true, settings });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "failed to save settings" });
+  }
+});
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
@@ -172,19 +212,35 @@ app.get("/incidents/:id/actions", async (req, res) => {
   res.json(actions);
 });
 
+// Global feed of agent activity — every proposed/completed action across
+// every incident and every chat conversation, not scoped to one incident.
+// This is what makes the dashboard show what the AGENT has actually been
+// doing, instead of only the simulator's synthetic service blips.
+app.get("/actions", async (req, res) => {
+  const status = req.query.status as string | undefined;
+  const actions = await prisma.agentAction.findMany({
+    where: status ? { status } : undefined,
+    orderBy: { createdAt: "desc" },
+    take: 50,
+    include: { incident: { include: { service: true } } },
+  });
+  res.json(actions);
+});
+
 // --- Sprint 8: Permission layer ---
 // The agent can only *propose* a write action (rollback, restart_pod, scale).
 // Nothing executes until a human explicitly approves it here — this is the
 // "AI Agent -> Permission Layer -> read ✓ / write ? approval" gate from the plan.
 
 app.post("/incidents/:id/actions", async (req, res) => {
-  const { type = "restart_pod", summary } = req.body ?? {};
+  const { type = "restart_pod", summary, browserPayload } = req.body ?? {};
   const action = await prisma.agentAction.create({
     data: {
       incidentId: req.params.id,
       type,
       status: "pending",
       summary: summary ?? `Proposed action: ${type}`,
+      evidence: browserPayload ? { payload: browserPayload } : undefined,
     },
   });
   res.json(action);
@@ -206,6 +262,46 @@ app.post("/actions/:id/reject", async (req, res) => {
     data: { status: "rejected", resolvedAt: new Date() },
   });
   res.json(action);
+});
+
+// --- Chat (multi-turn conversational agent) ---
+
+app.post("/chat/conversations", async (req, res) => {
+  const conversation = await createConversation(req.body?.title);
+  res.json(conversation);
+});
+
+app.get("/chat/conversations", async (req, res) => {
+  res.json(await listConversations());
+});
+
+app.get("/chat/conversations/:id/messages", async (req, res) => {
+  res.json(await getConversationMessages(req.params.id));
+});
+
+app.post("/chat/conversations/:id/messages", async (req, res) => {
+  try {
+    const result = await sendMessage(req.params.id, req.body?.message ?? "");
+    res.json(result);
+  } catch (err) {
+    console.error("[chat] sendMessage failed:", err);
+    res.status(500).json({ error: err instanceof Error ? err.message : "chat failed" });
+  }
+});
+
+app.patch("/chat/conversations/:id", async (req, res) => {
+  const conversation = await renameConversation(req.params.id, req.body?.title ?? "");
+  res.json(conversation);
+});
+
+app.delete("/chat/conversations/:id", async (req, res) => {
+  await deleteConversation(req.params.id);
+  res.json({ deleted: true });
+});
+
+app.delete("/chat/conversations", async (req, res) => {
+  const result = await deleteEmptyConversations();
+  res.json(result);
 });
 
 app.listen(PORT, () => {

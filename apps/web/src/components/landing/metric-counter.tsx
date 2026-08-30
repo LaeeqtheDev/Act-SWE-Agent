@@ -15,10 +15,12 @@ if (typeof window !== "undefined") {
 // trust from specific, verifiable claims than from generic superlatives.
 export function MetricCounter({
   value,
+  prefix = "",
   suffix = "",
   label,
 }: {
   value: number;
+  prefix?: string;
   suffix?: string;
   label: string;
 }) {
@@ -47,6 +49,7 @@ export function MetricCounter({
   return (
     <div>
       <div style={{ fontFamily: "var(--font-mono)" }} className="text-4xl md:text-5xl font-medium text-[#E8ECEF] tabular-nums">
+        {prefix}
         <span ref={numRef}>0</span>
         {suffix}
       </div>
