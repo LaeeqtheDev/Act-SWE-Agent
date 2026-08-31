@@ -2,12 +2,17 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
+import { UserButton } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, Send, Loader2, Wrench, Bot, User, Settings } from "lucide-react";
 import { ChatSidebar, type ConversationSummary } from "@/components/agent/chat-sidebar";
 import { SettingsPanel } from "@/components/agent/settings-panel";
+import { ClerkTokenBridge } from "@/components/auth/clerk-token-bridge";
+import { UsageBanner } from "@/components/agent/usage-banner";
+import { ProposedActionCard } from "@/components/agent/proposed-action-card";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const isHostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
 
 interface ToolTraceEntry {
   name: string;
@@ -35,26 +40,55 @@ const SUGGESTIONS = [
   "Is payments-api healthy? If not, propose restarting it.",
 ];
 
+// A proposeAction tool result looks like { proposed, actionId, status } —
+// but when reloaded from history it comes back as a JSON string (stored
+// that way in the DB), while a fresh live response has it as a real object
+// already. This normalizes both so the approval card renders either way.
+function extractPendingAction(entry: ToolTraceEntry): { actionId: string } | null {
+  if (entry.name !== "proposeAction") return null;
+  let output: unknown = entry.output;
+  if (typeof output === "string") {
+    try {
+      output = JSON.parse(output);
+    } catch {
+      return null;
+    }
+  }
+  if (output && typeof output === "object" && "actionId" in output) {
+    return { actionId: String((output as { actionId: unknown }).actionId) };
+  }
+  return null;
+}
+
 export default function AgentChatPage() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   // null = no conversation created yet. One is only created in the backend
-  // the moment the user actually sends their first message — opening the
-  // page, clicking "New chat", or switching away never creates an empty row.
+  // the moment the user actually sends their first message.
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // undefined until the token bridge reports in. Self-hosted mode reports
+  // undefined immediately (no auth needed); hosted mode reports Clerk's
+  // real getToken function once available.
+  const [getToken, setGetToken] = useState<(() => Promise<string | null>) | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
+
+  const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
+    if (!getToken) return {};
+    const token = await getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, [getToken]);
 
   const loadConversations = useCallback(async () => {
     try {
-      const res = await fetch(`${API_URL}/chat/conversations`);
+      const res = await fetch(`${API_URL}/chat/conversations`, { headers: await authHeaders() });
       setConversations(await res.json());
     } catch {
       // API not reachable — leave the sidebar empty rather than crash the page.
     }
-  }, []);
+  }, [authHeaders]);
 
   useEffect(() => {
     loadConversations();
@@ -71,12 +105,9 @@ export default function AgentChatPage() {
 
   async function selectConversation(id: string) {
     setConversationId(id);
-    const res = await fetch(`${API_URL}/chat/conversations/${id}/messages`);
+    const res = await fetch(`${API_URL}/chat/conversations/${id}/messages`, { headers: await authHeaders() });
     const messages: StoredMessage[] = await res.json();
 
-    // Collapse the flat stored message log (user/assistant/tool rows) back
-    // into the turn-based shape the UI renders — group each assistant reply
-    // with the tool calls that led up to it.
     const rebuilt: ChatTurn[] = [];
     let pendingTrace: ToolTraceEntry[] = [];
     for (const m of messages) {
@@ -94,13 +125,13 @@ export default function AgentChatPage() {
   }
 
   async function deleteConversation(id: string) {
-    await fetch(`${API_URL}/chat/conversations/${id}`, { method: "DELETE" });
+    await fetch(`${API_URL}/chat/conversations/${id}`, { method: "DELETE", headers: await authHeaders() });
     await loadConversations();
     if (id === conversationId) startNewChat();
   }
 
   async function clearEmptyConversations() {
-    await fetch(`${API_URL}/chat/conversations`, { method: "DELETE" });
+    await fetch(`${API_URL}/chat/conversations`, { method: "DELETE", headers: await authHeaders() });
     await loadConversations();
   }
 
@@ -110,11 +141,11 @@ export default function AgentChatPage() {
     setInput("");
     setSending(true);
     try {
-      // Lazily create the conversation on the very first message of a new
-      // chat — this is the only place a Conversation row ever gets created.
+      const headers = await authHeaders();
+
       let activeId = conversationId;
       if (!activeId) {
-        const createRes = await fetch(`${API_URL}/chat/conversations`, { method: "POST" });
+        const createRes = await fetch(`${API_URL}/chat/conversations`, { method: "POST", headers });
         const conv = await createRes.json();
         activeId = conv.id;
         setConversationId(activeId);
@@ -122,7 +153,7 @@ export default function AgentChatPage() {
 
       const res = await fetch(`${API_URL}/chat/conversations/${activeId}/messages`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
@@ -146,6 +177,8 @@ export default function AgentChatPage() {
 
   return (
     <div className="h-screen bg-background flex">
+      <ClerkTokenBridge onReady={setGetToken} />
+
       <ChatSidebar
         conversations={conversations}
         activeId={conversationId}
@@ -168,12 +201,14 @@ export default function AgentChatPage() {
               </h1>
             </div>
             <div className="flex items-center gap-4">
+              <UsageBanner apiUrl={API_URL} getToken={getToken} />
               <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground">
                 <Settings className="h-4 w-4" />
               </button>
               <Link href="/dashboard" className="text-xs text-muted-foreground hover:text-foreground">
                 Incidents & activity →
               </Link>
+              {isHostedMode && <UserButton afterSignOutUrl="/" />}
             </div>
           </div>
         </div>
@@ -216,6 +251,21 @@ export default function AgentChatPage() {
                     </div>
                   )}
                   <p className="text-sm whitespace-pre-wrap leading-relaxed">{turn.content}</p>
+                  {turn.toolTrace?.map((t, j) => {
+                    const pending = extractPendingAction(t);
+                    if (!pending) return null;
+                    return (
+                      <ProposedActionCard
+                        key={j}
+                        action={pending}
+                        apiUrl={API_URL}
+                        authHeaders={authHeaders}
+                        onDecided={(decision) =>
+                          send(decision === "approved" ? "I approved that — please continue." : "I rejected that — let's try something else.")
+                        }
+                      />
+                    );
+                  })}
                   {turn.provider && <p className="text-[10px] font-mono text-muted-foreground mt-1">{turn.provider}</p>}
                 </div>
               </div>
@@ -251,7 +301,7 @@ export default function AgentChatPage() {
         </div>
       </main>
 
-      <SettingsPanel apiUrl={API_URL} open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsPanel apiUrl={API_URL} open={settingsOpen} onOpenChange={setSettingsOpen} getToken={getToken} />
     </div>
   );
 }

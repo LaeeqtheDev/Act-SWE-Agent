@@ -20,6 +20,13 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 // close that window yourself, the next tool call detects it and opens a
 // fresh one rather than silently losing track and multiplying windows.
 //
+// When visible (BROWSER_HEADLESS=false or a real Chrome profile), actions
+// move the mouse smoothly to the target before clicking and type
+// character-by-character instead of instantly pasting — so watching it work
+// actually looks like something is happening, not just DOM state teleporting.
+// A small slowMo is added in visible mode only; headless/production runs get
+// none of that overhead.
+//
 // Anything that CHANGES state (clicking, filling, sending, creating) only
 // ever happens through performBrowserAction, which is only ever called
 // after a human has approved the proposed action.
@@ -29,29 +36,28 @@ let page: Page | null = null;
 let throwawayBrowser: Browser | null = null;
 let launching: Promise<void> | null = null;
 
+function isVisible(): boolean {
+  return process.env.BROWSER_HEADLESS === "false" || !!process.env.CHROME_USER_DATA_DIR;
+}
+
 async function ensureBrowser(): Promise<void> {
-  // Already have a live page? Reuse it — this is what makes multi-step
-  // browsing (open something, then act on it) feel continuous instead of
-  // spawning a new window per step.
   if (page && !page.isClosed()) return;
   if (launching) return launching;
 
   launching = (async () => {
     const userDataDir = process.env.CHROME_USER_DATA_DIR;
     const wantHeadless = process.env.BROWSER_HEADLESS !== "false";
+    const slowMo = isVisible() ? 120 : 0; // just enough to see it happening, not enough to feel slow
 
     try {
       if (userDataDir) {
-        context = await chromium.launchPersistentContext(userDataDir, { headless: false, channel: "chrome" });
+        context = await chromium.launchPersistentContext(userDataDir, { headless: false, channel: "chrome", slowMo });
       } else {
-        throwawayBrowser = await chromium.launch({ headless: wantHeadless });
+        throwawayBrowser = await chromium.launch({ headless: wantHeadless, slowMo });
         context = await throwawayBrowser.newContext();
       }
       page = await context.newPage();
 
-      // If the user closes the window/tab themselves, don't keep pointing at
-      // a dead page — the next call will notice via page.isClosed() and
-      // relaunch cleanly instead of throwing into a broken session.
       page.on("close", () => {
         if (page && page.isClosed()) page = null;
       });
@@ -73,11 +79,6 @@ export async function browseWeb(url: string): Promise<{ title: string; text: str
   const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20_000 });
   const title = await page.title();
   const text = await page.evaluate(() => document.body.innerText);
-  // Kept small on purpose — Groq's free tier has a very tight tokens-per-minute
-  // budget (as low as 8,000 TPM), and a multi-step tool-calling conversation
-  // resends the whole history on every turn. A handful of full-length page
-  // dumps blows that budget fast; 1200 chars is plenty for the model to work
-  // from without hitting rate limits mid-task.
   return { title, text: text.slice(0, 1200), status: response?.status() ?? null };
 }
 
@@ -86,6 +87,47 @@ export interface BrowserActionPayload {
   action: "click" | "fill";
   selector: string;
   value?: string;
+}
+
+// Draws a small dot that follows the real mouse position — Playwright moves
+// the actual OS-level cursor, but nothing highlights *where* it is on
+// screen by default, so in visible mode this makes it obvious to a human
+// watching. Purely cosmetic — removed automatically when the page navigates.
+async function injectCursorOverlay(p: Page): Promise<void> {
+  await p.evaluate(() => {
+    if (document.getElementById("__agent_cursor__")) return;
+    const dot = document.createElement("div");
+    dot.id = "__agent_cursor__";
+    Object.assign(dot.style, {
+      position: "fixed",
+      top: "0",
+      left: "0",
+      width: "16px",
+      height: "16px",
+      borderRadius: "50%",
+      background: "rgba(245, 168, 80, 0.85)",
+      border: "2px solid white",
+      pointerEvents: "none",
+      zIndex: "2147483647",
+      transform: "translate(-50%, -50%)",
+      transition: "left 0.05s linear, top 0.05s linear",
+    });
+    document.body.appendChild(dot);
+    document.addEventListener("mousemove", (e) => {
+      dot.style.left = `${e.clientX}px`;
+      dot.style.top = `${e.clientY}px`;
+    });
+  });
+}
+
+async function moveTo(p: Page, x: number, y: number): Promise<void> {
+  if (!isVisible()) {
+    await p.mouse.move(x, y);
+    return;
+  }
+  // Interpolated movement (25 intermediate steps) so the cursor visibly
+  // glides to the target instead of teleporting there instantly.
+  await p.mouse.move(x, y, { steps: 25 });
 }
 
 export async function performBrowserAction(
@@ -97,12 +139,27 @@ export async function performBrowserAction(
     if (page.url() !== payload.url) {
       await page.goto(payload.url, { waitUntil: "domcontentloaded", timeout: 20_000 });
     }
+    if (isVisible()) await injectCursorOverlay(page);
+
+    const locator = page.locator(payload.selector).first();
+    const box = await locator.boundingBox({ timeout: 10_000 }).catch(() => null);
+    if (box) {
+      await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+    }
+
     if (payload.action === "click") {
-      await page.click(payload.selector, { timeout: 10_000 });
+      await locator.click({ timeout: 10_000 });
       return { success: true, note: `clicked ${payload.selector}` };
     }
     if (payload.action === "fill") {
-      await page.fill(payload.selector, payload.value ?? "", { timeout: 10_000 });
+      await locator.click({ timeout: 10_000 }); // focus the field first, visibly
+      await locator.fill(""); // clear
+      if (isVisible()) {
+        // Types visibly, character by character, instead of an instant paste.
+        await locator.pressSequentially(payload.value ?? "", { delay: 35 });
+      } else {
+        await locator.fill(payload.value ?? "");
+      }
       return { success: true, note: `filled ${payload.selector}` };
     }
     return { success: false, error: `unknown action: ${payload.action}` };

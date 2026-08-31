@@ -19,7 +19,17 @@ interface Settings {
   maskedKey: string | null;
 }
 
-export function SettingsPanel({ apiUrl, open, onOpenChange }: { apiUrl: string; open: boolean; onOpenChange: (open: boolean) => void }) {
+export function SettingsPanel({
+  apiUrl,
+  open,
+  onOpenChange,
+  getToken,
+}: {
+  apiUrl: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  getToken?: () => Promise<string | null>;
+}) {
   const [catalog, setCatalog] = useState<Catalog>({});
   const [settings, setSettings] = useState<Settings | null>(null);
   const [provider, setProvider] = useState("groq");
@@ -30,18 +40,27 @@ export function SettingsPanel({ apiUrl, open, onOpenChange }: { apiUrl: string; 
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  async function authHeaders(): Promise<Record<string, string>> {
+    if (!getToken) return {};
+    const token = await getToken();
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
   useEffect(() => {
     if (!open) return;
-    fetch(`${apiUrl}/settings/provider`)
-      .then((r) => r.json())
-      .then((data) => {
-        setCatalog(data.catalog);
-        if (data.settings) {
-          setSettings(data.settings);
-          setProvider(data.settings.provider);
-          setModel(data.settings.model);
-        }
-      });
+    authHeaders().then((headers) =>
+      fetch(`${apiUrl}/settings/provider`, { headers })
+        .then((r) => r.json())
+        .then((data) => {
+          setCatalog(data.catalog);
+          if (data.settings) {
+            setSettings(data.settings);
+            setProvider(data.settings.provider);
+            setModel(data.settings.model);
+          }
+        })
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, apiUrl]);
 
   async function save() {
@@ -51,7 +70,7 @@ export function SettingsPanel({ apiUrl, open, onOpenChange }: { apiUrl: string; 
     try {
       const res = await fetch(`${apiUrl}/settings/provider`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(await authHeaders()) },
         body: JSON.stringify({ provider, model, apiKey: apiKey || undefined }),
       });
       const data = await res.json();

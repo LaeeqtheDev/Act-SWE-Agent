@@ -7,21 +7,21 @@ import { gsap } from "gsap";
 // README, then reveals the actual response shape the API returns, then the
 // worker's detection line. This is real content pulled straight from how
 // the project actually works — not a decorative fake console.
-const LINES: { text: string; tone: "prompt" | "dim" | "amber" | "cyan" }[] = [
+const LINES: { text: string; tone: "prompt" | "dim" | "amber" | "bright" }[] = [
   { text: "$ curl -X POST localhost:4000/simulate/database-overload \\", tone: "prompt" },
   { text: "    -d '{\"serviceName\": \"payments-api\"}'", tone: "prompt" },
   { text: "{ \"queued\": 4, \"serviceId\": \"a322540f...\" }", tone: "dim" },
   { text: "[worker] processed event: db_connections", tone: "dim" },
   { text: "[worker] processed event: error_rate", tone: "dim" },
   { text: "[worker] incident created: high severity", tone: "amber" },
-  { text: "✓ AI agent investigating...", tone: "cyan" },
+  { text: "✓ AI agent investigating...", tone: "bright" },
 ];
 
 const toneColor: Record<string, string> = {
-  prompt: "#E8ECEF",
-  dim: "#7C8A99",
-  amber: "#F5A623",
-  cyan: "#35C7C0",
+  prompt: "var(--foreground)",
+  dim: "var(--muted-foreground)",
+  amber: "var(--warn)",
+  bright: "var(--foreground)",
 };
 
 export function TerminalDemo() {
@@ -45,12 +45,12 @@ export function TerminalDemo() {
   }, []);
 
   return (
-    <div className="rounded-lg border border-[#1E2630] bg-[#0E1420] overflow-hidden shadow-2xl shadow-black/40">
-      <div className="flex items-center gap-1.5 px-4 py-3 border-b border-[#1E2630]">
-        <span className="h-2.5 w-2.5 rounded-full bg-[#2A3644]" />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#2A3644]" />
-        <span className="h-2.5 w-2.5 rounded-full bg-[#2A3644]" />
-        <span style={{ fontFamily: "var(--font-mono)" }} className="ml-2 text-[11px] text-[#7C8A99]">
+    <div className="rounded-lg border border-border bg-card overflow-hidden shadow-2xl shadow-black/40">
+      <div className="flex items-center gap-1.5 px-4 py-3 border-b border-border">
+        <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/30" />
+        <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/30" />
+        <span className="h-2.5 w-2.5 rounded-full bg-muted-foreground/30" />
+        <span style={{ fontFamily: "var(--font-mono)" }} className="ml-2 text-[11px] text-muted-foreground">
           act-swe-agent — zsh
         </span>
       </div>

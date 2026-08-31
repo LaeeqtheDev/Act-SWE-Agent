@@ -46,6 +46,26 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<
 
 export const ANTHROPIC_MODELS = ["claude-sonnet-4-5", "claude-opus-4-1", "claude-haiku-4-5"];
 
+// Phase 6 — which models are "premium." Free hosted accounts are restricted
+// to the cheap/fast models (still genuinely useful — Groq's gpt-oss-20b is
+// fast and capable); Pro unlocks the larger, more expensive ones. Self-hosted
+// and BYOK usage is never restricted by this at all — see index.ts, this
+// check only runs when HOSTED_MODE is true.
+const PREMIUM_MODELS = new Set([
+  "claude-sonnet-4-5",
+  "claude-opus-4-1",
+  "gpt-4o",
+  "gpt-4.1",
+  "o3-mini",
+  "grok-2-latest",
+  "openai/gpt-oss-120b",
+  "groq/compound",
+]);
+
+export function isPremiumModel(model: string): boolean {
+  return PREMIUM_MODELS.has(model);
+}
+
 function buildProvider(providerName: string, apiKey: string, model: string): AIProvider | null {
   if (providerName === "anthropic") {
     return createAnthropicProvider(apiKey, model);
@@ -59,9 +79,10 @@ function buildProvider(providerName: string, apiKey: string, model: string): AIP
 // priority over env vars, so pasting a key in the UI "just works" without
 // touching .env or restarting anything. Falls back to env vars when no UI
 // config has been saved yet — so it keeps working exactly as before for
-// anyone who prefers .env.
-export async function getProvider(): Promise<AIProvider | null> {
-  const dbConfig = await getDecryptedProviderConfig().catch(() => null);
+// anyone who prefers .env. In hosted mode, pass the signed-in user's id so
+// each person's own saved key/model is used, never someone else's.
+export async function getProvider(userId?: string): Promise<AIProvider | null> {
+  const dbConfig = await getDecryptedProviderConfig(userId).catch(() => null);
   if (dbConfig?.apiKey) {
     const provider = buildProvider(dbConfig.provider, dbConfig.apiKey, dbConfig.model);
     if (provider) return provider;

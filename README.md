@@ -93,7 +93,9 @@ Managed with **Turborepo + pnpm workspaces**.
 
 Honest list of what's real but needs your own setup: running the latest Prisma migrations, generating a settings encryption key, installing Playwright's browser binary, setting `CHROME_USER_DATA_DIR` for persistent logins, applying the Kubernetes manifests, reviewing and applying the Terraform scaffold, adding CI/CD secrets, and finishing OTel instrumentation.
 
-**Not yet built:** Clerk (or equivalent) user accounts, Stripe + bank-transfer billing, usage metering/quotas, fine-tuning. These are the next phases.
+**Now built (opt-in, off by default):** Clerk auth + usage limits (10 free tasks/month, 500 on Pro), Stripe checkout, a manually-reviewed bank-transfer path, and premium-model gating by plan — see [NEXT_STEPS.md](./NEXT_STEPS.md) #17-19. Self-hosting is completely unaffected; `HOSTED_MODE` stays unset and none of this code path ever runs.
+
+**Not yet built:** fine-tuning, a UI for reviewing bank-transfer receipts (currently admin API calls), Stripe customer-portal cancellation.
 
 ---
 

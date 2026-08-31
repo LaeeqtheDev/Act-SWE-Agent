@@ -5,6 +5,8 @@ import { getTools, runTool, compactHistoryForRequest } from "./tools/index.js";
 import { restartDeployment } from "./k8s.js";
 import { performBrowserAction, type BrowserActionPayload } from "./tools/browser.js";
 import { performFileEdit, performShellCommand, type FileEditPayload, type ShellCommandPayload } from "./tools/devtools.js";
+import { checkAndIncrementUsage, UsageLimitError } from "./usage.js";
+import { appendFollowUp } from "./chat.js";
 
 const prisma = new PrismaClient();
 
@@ -24,8 +26,9 @@ can look up.
 Investigate the incident thoroughly: check the service's health, recent raw events, deployment/incident
 history, and — if a Kubernetes cluster is reachable — live pod and cluster event data. Use browseWeb if
 checking an external status page or runbook would help. If you believe a write action (restarting a pod,
-rolling back, or a browser action) would help, call proposeAction — this only requests human approval, it
-never executes anything itself.
+rolling back, or a browser action) would help, call proposeAction — this ONLY creates a pending approval,
+it never executes anything itself. Never describe a proposed action as done; "recommendedAction" should
+describe what you'd propose, not something that already happened. No emoji.
 
 When you are done investigating, respond with ONLY a JSON object (no markdown fences, no prose before or
 after) matching this exact shape:
@@ -37,8 +40,25 @@ after) matching this exact shape:
   "recommendedAction": "a short, concrete next step"
 }`;
 
-export async function investigateIncident(incidentId: string): Promise<InvestigationResult> {
-  const provider = await getProvider();
+export async function investigateIncident(incidentId: string, userId?: string): Promise<InvestigationResult> {
+  if (userId) {
+    try {
+      await checkAndIncrementUsage(userId);
+    } catch (err) {
+      if (err instanceof UsageLimitError) {
+        return {
+          summary: err.message,
+          probableCause: "usage limit reached",
+          confidence: 0,
+          evidence: [],
+          recommendedAction: "Upgrade your plan or add your own API key in Settings.",
+        };
+      }
+      throw err;
+    }
+  }
+
+  const provider = await getProvider(userId);
   if (!provider) {
     return {
       summary:
@@ -123,12 +143,29 @@ export async function performAction(actionId: string) {
   if (!action) throw new Error("action not found");
   if (action.status !== "approved") throw new Error("action is not approved");
 
+  // Every branch below funnels through this at the end — it's what makes an
+  // approval feel finished instead of leaving the chat hanging. If the
+  // action came from a conversation, that conversation gets a real message
+  // saying what happened, so coming back to it later (or asking a follow-up
+  // right away) has actual context instead of silence.
+  async function finish<T>(result: T, summary: string) {
+    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
+    if (action!.conversationId) {
+      await appendFollowUp(action!.conversationId, summary);
+    }
+    return result;
+  }
+
   if (action.type === "browser_action") {
     const evidence = action.evidence as { payload?: BrowserActionPayload } | null;
     if (!evidence?.payload) throw new Error("no browser action payload stored on this action");
     const result = await performBrowserAction(evidence.payload);
-    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-    return result;
+    return finish(
+      result,
+      result.success
+        ? `Done — ${result.note ?? "the browser action completed"}.`
+        : `That didn't work: ${result.error ?? "unknown error"}.`
+    );
   }
 
   if (action.type === "file_edit") {
@@ -136,8 +173,23 @@ export async function performAction(actionId: string) {
     const evidence = action.evidence as { payload?: FileEditPayload } | null;
     if (!evidence?.payload) throw new Error("no file edit payload stored on this action");
     const result = await performFileEdit(evidence.payload);
-    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-    return result;
+
+    // Auto-open the file the moment it's actually written — this is the
+    // whole point of asking "what should happen once it's created": the
+    // answer is "it opens for you," not "go find it yourself."
+    let openedNote = "";
+    if (result.success) {
+      const { openInEditor } = await import("./tools/devtools.js");
+      const openResult = await openInEditor(evidence.payload.path);
+      openedNote = openResult.success ? ` Opened it in your editor.` : "";
+    }
+
+    return finish(
+      result,
+      result.success
+        ? `Created ${evidence.payload.path}.${openedNote} Want me to add anything to it, or create something else?`
+        : `Couldn't create the file: ${result.error ?? "unknown error"}.`
+    );
   }
 
   if (action.type === "shell_command") {
@@ -145,13 +197,14 @@ export async function performAction(actionId: string) {
     const evidence = action.evidence as { payload?: ShellCommandPayload } | null;
     if (!evidence?.payload) throw new Error("no shell command payload stored on this action");
     const result = await performShellCommand(evidence.payload);
-    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-    return result;
+    return finish(
+      result,
+      `Ran it. ${result.code === 0 ? "Exited cleanly." : `Exit code ${result.code}.`}${result.stdout ? `\n\n${result.stdout.slice(0, 500)}` : ""}`
+    );
   }
 
   if (!action.incidentId) {
-    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-    return { success: false, note: "no incident/service context attached to this action" };
+    return finish({ success: false, note: "no incident/service context attached to this action" }, "Couldn't complete that — no service context was attached to it.");
   }
 
   const incident = await prisma.incident.findUnique({ where: { id: action.incidentId }, include: { service: true } });
@@ -159,10 +212,8 @@ export async function performAction(actionId: string) {
 
   if (action.type === "restart_pod" || action.type === "rollback") {
     const result = await restartDeployment(incident.service.name);
-    await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-    return result;
+    return finish(result, result.success ? `Restarted ${incident.service.name}.` : `Restart failed: ${result.reason ?? "unknown error"}.`);
   }
 
-  await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
-  return { success: true, note: "no action required for this action type" };
+  return finish({ success: true, note: "no action required for this action type" }, "Done.");
 }

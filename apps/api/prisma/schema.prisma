@@ -34,16 +34,21 @@ model Incident {
 }
 
 model AgentAction {
-  id         String    @id @default(uuid())
-  incidentId String?
-  incident   Incident? @relation(fields: [incidentId], references: [id])
-  type       String    @default("investigation") // investigation | rollback | restart_pod | scale | browser_action | file_edit | shell_command | web_search
-  status     String    @default("pending")        // pending | approved | rejected | completed
-  summary    String?
-  confidence Float?
-  evidence   Json?
-  createdAt  DateTime  @default(now())
-  resolvedAt DateTime?
+  id             String    @id @default(uuid())
+  incidentId     String?
+  incident       Incident? @relation(fields: [incidentId], references: [id])
+  // Set when the action was proposed from a chat conversation rather than
+  // an incident investigation — lets performAction() write a follow-up
+  // message back into that same chat once the action completes, so the
+  // conversation continues naturally instead of going dead after approval.
+  conversationId String?
+  type           String    @default("investigation") // investigation | rollback | restart_pod | scale | browser_action | file_edit | shell_command | web_search
+  status         String    @default("pending")        // pending | approved | rejected | completed
+  summary        String?
+  confidence     Float?
+  evidence       Json?
+  createdAt      DateTime  @default(now())
+  resolvedAt     DateTime?
 }
 
 // A single active AI provider configuration, editable from the settings UI
@@ -58,9 +63,42 @@ model ProviderConfig {
   updatedAt DateTime @updatedAt
 }
 
+// Only populated in hosted mode (HOSTED_MODE=true). Self-hosted / BYOK usage
+// never touches this table — there's no account, no limit, nothing to meter.
+// id is the Clerk user id, so this row is created lazily the first time a
+// signed-in user completes a task.
+model User {
+  id          String   @id
+  email       String?
+  plan        String   @default("free") // free | pro
+  tasksUsed   Int      @default(0)
+  periodStart DateTime @default(now())
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+  createdAt   DateTime @default(now())
+}
+
+// Bank-transfer path: a user uploads a receipt, it sits here as "pending"
+// until a human (you) reviews and approves/rejects it — never
+// auto-approved. This is deliberate: automatically trusting an uploaded
+// image as proof of a real bank transfer would be a straightforward fraud
+// vector, so a person always makes the actual call.
+model PendingPayment {
+  id          String   @id @default(uuid())
+  userId      String
+  receiptPath String
+  fileName    String
+  amount      String?
+  note        String?
+  status      String   @default("pending") // pending | approved | rejected
+  createdAt   DateTime @default(now())
+  reviewedAt  DateTime?
+}
+
 model Conversation {
   id        String        @id @default(uuid())
   title     String?
+  userId    String?       // set only in hosted mode — null for self-host (no accounts)
   createdAt DateTime      @default(now())
   messages  ChatMessage[]
 }

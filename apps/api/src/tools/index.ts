@@ -203,6 +203,7 @@ export function compactHistoryForRequest(history: AgentMessage[], keepFullLastN 
 
 export interface ToolContext {
   incidentId?: string; // present when the caller is investigating a specific incident
+  conversationId?: string; // present when the caller is a chat conversation
 }
 
 export async function runTool(name: string, input: Record<string, unknown>, ctx: ToolContext = {}) {
@@ -263,13 +264,20 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       const action = await prisma.agentAction.create({
         data: {
           incidentId: ctx.incidentId ?? null,
+          conversationId: ctx.conversationId ?? null,
           type: "file_edit",
           status: "pending",
           summary: `Create document: ${title}`,
           evidence: { payload: filePayload },
         },
       });
-      return { proposed: true, actionId: action.id, path: filePayload.path, status: "pending human approval" };
+      return {
+        proposed: true,
+        actionId: action.id,
+        path: filePayload.path,
+        status: "pending human approval",
+        note: "Do not tell the user to manually perform this action themselves — it will execute automatically once approved, and you'll be notified in this conversation when it completes.",
+      };
     }
     case "proposeAction": {
       let incidentId = ctx.incidentId ?? null;
@@ -288,13 +296,19 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       const action = await prisma.agentAction.create({
         data: {
           incidentId,
+          conversationId: ctx.conversationId ?? null,
           type: (input.type as string) ?? "restart_pod",
           status: "pending",
           summary: input.summary as string,
           evidence: payload ? { payload } : undefined,
         },
       });
-      return { proposed: true, actionId: action.id, status: "pending human approval" };
+      return {
+        proposed: true,
+        actionId: action.id,
+        status: "pending human approval",
+        note: "Do not tell the user to manually perform this action themselves — it will execute automatically once approved, and you'll be notified in this conversation when it completes.",
+      };
     }
     default:
       return { error: `unknown tool: ${name}` };

@@ -39,13 +39,13 @@ const scenarios = [
 export default function CaseStudiesPage() {
   return (
     <MarketingShell>
-      <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-[#35C7C0] mb-4">
+      <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-4">
         Case studies
       </p>
-      <h1 style={{ fontFamily: "var(--font-mono)" }} className="text-3xl md:text-4xl font-medium text-[#E8ECEF] mb-4">
+      <h1 style={{ fontFamily: "var(--font-mono)" }} className="text-3xl md:text-4xl font-medium text-foreground mb-4">
         Real scenarios, walked through
       </h1>
-      <p className="text-[#7C8A99] mb-12 max-w-xl">
+      <p className="text-muted-foreground mb-12 max-w-xl">
         This project doesn&apos;t have paying customers yet, so instead of fabricated testimonials, here&apos;s
         exactly what happens — end to end, with the actual mechanism — for the built-in scenarios you can run
         yourself right now.
@@ -53,28 +53,28 @@ export default function CaseStudiesPage() {
 
       <div className="space-y-12">
         {scenarios.map((s) => (
-          <div key={s.title} className="border-t border-[#1E2630] pt-8">
+          <div key={s.title} className="border-t border-border pt-8">
             <div className="flex items-start gap-3 mb-4">
-              <s.icon className="h-5 w-5 text-[#F5A623] shrink-0 mt-0.5" />
+              <s.icon className="h-5 w-5 text-warn shrink-0 mt-0.5" />
               <div>
-                <h2 className="text-lg font-medium text-[#E8ECEF]">{s.title}</h2>
-                <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs text-[#4A5568] mt-1">{s.trigger}</p>
+                <h2 className="text-lg font-medium text-foreground">{s.title}</h2>
+                <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs text-muted-foreground/60 mt-1">{s.trigger}</p>
               </div>
             </div>
             <div className="space-y-3 pl-8">
               {s.story.map((p, i) => (
-                <p key={i} className="text-sm text-[#9AA7B4] leading-relaxed">{p}</p>
+                <p key={i} className="text-sm text-muted-foreground leading-relaxed">{p}</p>
               ))}
             </div>
           </div>
         ))}
       </div>
 
-      <div className="mt-16 border-t border-[#1E2630] pt-8 flex items-center gap-3">
-        <CheckCircle2 className="h-5 w-5 text-[#35C7C0]" />
-        <p className="text-sm text-[#9AA7B4]">
+      <div className="mt-16 border-t border-border pt-8 flex items-center gap-3">
+        <CheckCircle2 className="h-5 w-5 text-warn" />
+        <p className="text-sm text-muted-foreground">
           Want to see it live instead of reading about it? Open the{" "}
-          <a href="/agent" className="text-[#35C7C0] hover:underline">chat agent</a> and run any of these yourself.
+          <a href="/agent" className="text-warn hover:underline">chat agent</a> and run any of these yourself.
         </p>
       </div>
     </MarketingShell>

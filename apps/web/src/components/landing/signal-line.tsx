@@ -3,10 +3,10 @@
 import { useEffect, useRef } from "react";
 import { gsap } from "gsap";
 
-// The page's signature element: a signal line that spikes — an incident —
-// then is drawn back down and re-colored from amber to cyan, standing in for
-// "detected, then healed." This is the one animation the whole hero is built
-// around; everything else on the page stays quiet by comparison.
+// A signal line that spikes — an incident — then is drawn back down and
+// re-colored from amber to the theme's neutral foreground, standing in for
+// "detected, then healed." Uses the shared CSS variables so it always
+// matches whatever the current theme is, not a hardcoded palette.
 export function SignalLine() {
   const baseRef = useRef<SVGPathElement>(null);
   const spikeRef = useRef<SVGPathElement>(null);
@@ -24,7 +24,7 @@ export function SignalLine() {
     const spikeLength = spike.getTotalLength();
 
     gsap.set(base, { strokeDasharray: baseLength, strokeDashoffset: baseLength });
-    gsap.set(spike, { strokeDasharray: spikeLength, strokeDashoffset: spikeLength, stroke: "#F5A623" });
+    gsap.set(spike, { strokeDasharray: spikeLength, strokeDashoffset: spikeLength, stroke: "var(--warn)" });
     gsap.set(dot, { opacity: 0 });
     gsap.set(label, { opacity: 0, y: 6 });
 
@@ -34,8 +34,8 @@ export function SignalLine() {
       .to(spike, { strokeDashoffset: 0, duration: 0.5, ease: "power1.inOut" }, "-=0.15")
       .to(dot, { opacity: 1, duration: 0.2 }, "-=0.2")
       .to(label, { opacity: 1, y: 0, duration: 0.4 }, "-=0.1")
-      .to(spike, { stroke: "#35C7C0", duration: 0.8, ease: "power2.inOut" }, "+=0.3")
-      .to(dot, { fill: "#35C7C0", duration: 0.8 }, "<");
+      .to(spike, { stroke: "var(--foreground)", duration: 0.8, ease: "power2.inOut" }, "+=0.3")
+      .to(dot, { fill: "var(--foreground)", duration: 0.8 }, "<");
 
     return () => {
       tl.kill();
@@ -48,7 +48,7 @@ export function SignalLine() {
         ref={baseRef}
         d="M0,110 L260,110"
         fill="none"
-        stroke="#3A4656"
+        stroke="var(--border)"
         strokeWidth={2}
       />
       <path
@@ -59,8 +59,8 @@ export function SignalLine() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle ref={dotRef} cx={312} cy={132} r={4.5} fill="#F5A623" />
-      <text ref={labelRef} x={312} y={152} textAnchor="middle" className="fill-current text-[11px] font-mono" fill="#7C8A99">
+      <circle ref={dotRef} cx={312} cy={132} r={4.5} fill="var(--warn)" />
+      <text ref={labelRef} x={312} y={152} textAnchor="middle" className="fill-current text-[11px] font-mono" fill="var(--muted-foreground)">
         detected &rarr; resolved
       </text>
     </svg>

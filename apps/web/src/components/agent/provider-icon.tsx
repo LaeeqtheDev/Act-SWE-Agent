@@ -1,23 +1,61 @@
-// Distinct monogram badges per provider — a colored circle + letterform,
-// not a reproduction of any company's actual logo/trademark. Gives each
-// provider a genuinely different visual identity in lists instead of the
-// same generic icon repeated four times.
-const STYLES: Record<string, { bg: string; fg: string; mark: string }> = {
-  anthropic: { bg: "#D97757", fg: "#1A1108", mark: "A" },
-  openai: { bg: "#10A37F", fg: "#F5FFFC", mark: "O" },
-  grok: { bg: "#0E0E0E", fg: "#FFFFFF", mark: "X" },
-  groq: { bg: "#F55036", fg: "#FFFFFF", mark: "Q" },
-  ollama: { bg: "#E8DCC8", fg: "#3A2E1F", mark: "L" },
-};
-
+// Distinct minimal glyphs per provider — geometric marks, not colored badges,
+// so they sit naturally in a monochrome theme instead of introducing a rainbow
+// of brand colors. None of these reproduce any company's actual logo/trademark
+// — each is a simple original shape, differentiated by form, not color.
 export function ProviderIcon({ provider, size = 20 }: { provider: string; size?: number }) {
-  const style = STYLES[provider] ?? { bg: "#3A4656", fg: "#E8ECEF", mark: "?" };
-  return (
-    <span
-      style={{ width: size, height: size, background: style.bg, color: style.fg, fontSize: size * 0.52 }}
-      className="inline-flex items-center justify-center rounded-full font-semibold shrink-0 select-none"
-    >
-      {style.mark}
-    </span>
-  );
+  const common = {
+    width: size,
+    height: size,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.6,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+
+  switch (provider) {
+    case "anthropic":
+      // three ascending bars
+      return (
+        <svg {...common}>
+          <path d="M6 18V10M12 18V6M18 18V13" />
+        </svg>
+      );
+    case "openai":
+      // interlocking rings
+      return (
+        <svg {...common}>
+          <circle cx="9" cy="12" r="5.5" />
+          <circle cx="15" cy="12" r="5.5" />
+        </svg>
+      );
+    case "grok":
+      // angular spark
+      return (
+        <svg {...common}>
+          <path d="M5 19L12 5L19 19M8.5 13H15.5" />
+        </svg>
+      );
+    case "groq":
+      // stacked lightning
+      return (
+        <svg {...common}>
+          <path d="M13 3L5 14h6l-1 7 9-12h-6l1-6z" />
+        </svg>
+      );
+    case "ollama":
+      // simple llama-eared mark
+      return (
+        <svg {...common}>
+          <path d="M8 20V13a4 4 0 0 1 8 0v7M9 13V8M15 13V8M6 20h12" />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="7" />
+        </svg>
+      );
+  }
 }
