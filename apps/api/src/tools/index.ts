@@ -1,9 +1,11 @@
 import { PrismaClient } from "@prisma/client";
 import type { ToolDef, AgentMessage } from "../providers/index.js";
 import { getPodStatus, getRecentEvents as getK8sEvents } from "../k8s.js";
-import { browseWeb } from "./browser.js";
+import { browseWeb, clickToNavigate } from "./browser.js";
 import { webSearch } from "./search.js";
 import { readProjectFile, listProjectDirectory, openInEditor } from "./devtools.js";
+import { compactHistoryForRequest } from "../lib/history.js";
+import { getUserProfile } from "../profile.js";
 
 const prisma = new PrismaClient();
 
@@ -87,12 +89,28 @@ const baseTools: ToolDef[] = [
   {
     name: "browseWeb",
     description:
-      "Open a URL in a real browser and read its text content. If CHROME_USER_DATA_DIR is configured, this uses the user's own already-logged-in local Chrome profile, so it can read pages behind their existing logins (email, calendar, etc.) — otherwise it's a logged-out headless browser, fine for public pages.",
+      "Open a URL in a real browser and read its text content, plus a list of clickable/fillable elements on the page (each with a ready-to-use selector). Links in that list also include their resolved href — for plain navigation (opening a link, going to a different page/section), just call browseWeb on that href directly instead of proposing a browser_action click; it's the same destination either way, and only actions that actually submit, send, or change something need an approval. If CHROME_USER_DATA_DIR is configured, this uses the user's own already-logged-in local Chrome profile — Gmail (mail.google.com), Calendar (calendar.google.com), Docs (docs.google.com), LinkedIn (linkedin.com), Slack (app.slack.com) all work this way, using whatever the user is already signed into in that browser. Without it, this is a logged-out headless browser, fine only for public pages.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string" } },
       required: ["url"],
     },
+  },
+  {
+    name: "clickToNavigate",
+    description:
+      "Click a button/tab/control that only NAVIGATES or reveals content — an 'Open roles' button, a tab, 'next page', 'show more', expanding a listing. Returns the resulting page's text and interactiveElements so you can keep working immediately. Use this instead of proposeAction for anything that just moves you around or reveals information: it needs no approval because it changes nothing. Only use proposeAction when something is actually submitted, sent, posted, or applied.",
+    inputSchema: {
+      type: "object",
+      properties: { selector: { type: "string", description: "A selector from a prior browseWeb/clickToNavigate interactiveElements list." } },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "getUserProfile",
+    description:
+      "Get the user's saved personal details (name, email, phone, location, links, resume text, and any other saved fields) for filling out forms — job applications, contact forms, signups. Call this BEFORE proposing a form fill so you use their real information instead of asking them to repeat it.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "proposeAction",
@@ -101,7 +119,7 @@ const baseTools: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["restart_pod", "rollback", "browser_action", "file_edit", "shell_command"] },
+        type: { type: "string", enum: ["restart_pod", "rollback", "browser_action", "form_fill", "file_edit", "shell_command"] },
         summary: { type: "string", description: "One sentence explaining what this action does and why." },
         serviceName: { type: "string", description: "Required for restart_pod / rollback." },
         browserPayload: {
@@ -110,8 +128,24 @@ const baseTools: ToolDef[] = [
           properties: {
             url: { type: "string" },
             action: { type: "string", enum: ["click", "fill"] },
-            selector: { type: "string" },
+            selector: { type: "string", description: "A selector from a prior browseWeb call's interactiveElements — never guess a raw CSS selector." },
             value: { type: "string" },
+          },
+        },
+        formPayload: {
+          type: "object",
+          description: "Required only when type is form_fill. Fills every field then optionally clicks submit — ONE approval for the whole form, which is what makes applying to a job or filling a contact form practical.",
+          properties: {
+            url: { type: "string" },
+            fields: {
+              type: "array",
+              description: "Each field's selector (from interactiveElements) and the value to enter. Use getUserProfile first so these are the user's real details.",
+              items: {
+                type: "object",
+                properties: { selector: { type: "string" }, value: { type: "string" } },
+              },
+            },
+            submitSelector: { type: "string", description: "Optional — the submit/apply button to click after filling." },
           },
         },
         filePayload: {
@@ -176,34 +210,31 @@ const localDevTools: ToolDef[] = [
 ];
 
 export function getTools(): ToolDef[] {
+  // ENABLE_LOCAL_DEV_TOOLS is the single switch, hosted or not — you decide
+  // whether the agent gets filesystem and shell access on YOUR server.
+  //
+  // Worth being clear about what that means when other people can sign in:
+  // these tools operate on the machine running the API, not on the visitor's
+  // computer. Turning them on in a multi-user deployment gives every
+  // signed-up user read access to that server's files and the ability to
+  // propose shell commands on it. That's a legitimate choice for a
+  // single-operator deployment, and a serious one for a public signup — so
+  // it stays opt-in and off by default rather than silently enabled.
   return process.env.ENABLE_LOCAL_DEV_TOOLS === "true" ? [...baseTools, ...localDevTools] : baseTools;
 }
 
 // Kept for anything importing the flat list directly.
 export const tools = baseTools;
 
-// Small models on tight free-tier rate limits (Groq's on-demand tier can be
-// as low as 8,000 tokens/minute) choke fast in a multi-step tool-calling
-// conversation, because the ENTIRE history — including every prior tool
-// result — gets resent on every single turn. Shrinking older tool results
-// before each request keeps the payload from ballooning turn over turn,
-// while the full versions stay in the real history for anything that needs
-// them (e.g. persisting to the DB).
-export function compactHistoryForRequest(history: AgentMessage[], keepFullLastN = 2): AgentMessage[] {
-  const toolIndices = history.map((m, i) => (m.role === "tool" ? i : -1)).filter((i) => i >= 0);
-  const keepFull = new Set(toolIndices.slice(-keepFullLastN));
-
-  return history.map((m, i) => {
-    if (m.role === "tool" && !keepFull.has(i) && m.content.length > 250) {
-      return { ...m, content: `${m.content.slice(0, 250)}... [older result truncated to save context]` };
-    }
-    return m;
-  });
-}
+// compactHistoryForRequest lives in lib/history.ts (kept dependency-free from
+// Prisma so it's independently unit-testable) — re-exported here since
+// chat.ts and agent.ts already import it from this module.
+export { compactHistoryForRequest };
 
 export interface ToolContext {
   incidentId?: string; // present when the caller is investigating a specific incident
   conversationId?: string; // present when the caller is a chat conversation
+  userId?: string; // present in hosted mode — scopes the user's saved profile
 }
 
 export async function runTool(name: string, input: Record<string, unknown>, ctx: ToolContext = {}) {
@@ -244,9 +275,22 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       } catch (err) {
         return { error: err instanceof Error ? err.message : "search failed" };
       }
+    case "clickToNavigate":
+      try {
+        // Session key = conversation id, so parallel chats and scheduled
+        // workflows each drive their own browser window instead of fighting
+        // over one shared tab.
+        return await clickToNavigate(input.selector as string, ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "click failed" };
+      }
+    case "getUserProfile": {
+      const profile = await getUserProfile(ctx.userId);
+      return profile ?? { error: "No profile saved yet — the user can add their details in Settings so forms can be filled automatically." };
+    }
     case "browseWeb":
       try {
-        return await browseWeb(input.url as string);
+        return await browseWeb(input.url as string, ctx.conversationId);
       } catch (err) {
         return { error: err instanceof Error ? err.message : "browser tool failed" };
       }
@@ -292,7 +336,7 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
         }
       }
 
-      const payload = input.browserPayload ?? input.filePayload ?? input.shellPayload;
+      const payload = input.browserPayload ?? input.formPayload ?? input.filePayload ?? input.shellPayload;
       const action = await prisma.agentAction.create({
         data: {
           incidentId,
@@ -310,7 +354,11 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
         note: "Do not tell the user to manually perform this action themselves — it will execute automatically once approved, and you'll be notified in this conversation when it completes.",
       };
     }
-    default:
-      return { error: `unknown tool: ${name}` };
+    default: {
+      // Tell the model exactly what it CAN call, so it self-corrects on the
+      // next turn instead of repeating the same invented tool name.
+      const available = getTools().map((t) => t.name).join(", ");
+      return { error: `There is no tool called "${name}". Available tools: ${available}. Use one of those.` };
+    }
   }
 }

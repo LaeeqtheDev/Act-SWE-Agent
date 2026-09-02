@@ -8,8 +8,21 @@ import { Check, Eye, EyeOff, Loader2 } from "lucide-react";
 
 const PROVIDERS = ["groq", "anthropic", "openai", "grok", "ollama"];
 
+const KEY_SOURCES: Record<string, { url: string; label: string; note?: string }> = {
+  groq: { url: "https://console.groq.com/keys", label: "console.groq.com/keys", note: "Free tier, no card required." },
+  anthropic: { url: "https://console.anthropic.com/settings/keys", label: "console.anthropic.com" },
+  openai: { url: "https://platform.openai.com/api-keys", label: "platform.openai.com" },
+  grok: { url: "https://console.x.ai", label: "console.x.ai" },
+  ollama: { url: "https://ollama.com/download", label: "ollama.com", note: "Runs locally — no key needed." },
+};
+
 interface Catalog {
   [provider: string]: { models: string[] };
+}
+
+interface ServerInfo {
+  serverConfigured?: boolean;
+  serverModel?: string | null;
 }
 
 interface Settings {
@@ -32,6 +45,7 @@ export function SettingsPanel({
 }) {
   const [catalog, setCatalog] = useState<Catalog>({});
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [server, setServer] = useState<ServerInfo>({});
   const [provider, setProvider] = useState("groq");
   const [model, setModel] = useState("openai/gpt-oss-20b");
   const [apiKey, setApiKey] = useState("");
@@ -41,7 +55,7 @@ export function SettingsPanel({
   const [error, setError] = useState<string | null>(null);
 
   async function authHeaders(): Promise<Record<string, string>> {
-    if (!getToken) return {};
+    if (typeof getToken !== "function") return {};
     const token = await getToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
   }
@@ -53,6 +67,7 @@ export function SettingsPanel({
         .then((r) => r.json())
         .then((data) => {
           setCatalog(data.catalog);
+          setServer({ serverConfigured: data.serverConfigured, serverModel: data.serverModel });
           if (data.settings) {
             setSettings(data.settings);
             setProvider(data.settings.provider);
@@ -146,9 +161,19 @@ export function SettingsPanel({
             </div>
           )}
 
+          {server.serverConfigured && !settings?.hasKey && (
+            <div className="p-3 rounded-md bg-muted/50 text-xs">
+              <p className="text-foreground font-medium">You&apos;re all set — no key needed.</p>
+              <p className="text-muted-foreground mt-1">
+                Already running on <span className="font-mono">{server.serverModel}</span>. Add your own key
+                below only if you want a different model or to bypass usage limits.
+              </p>
+            </div>
+          )}
+
           <div>
             <label className="text-xs text-muted-foreground mb-1.5 block">
-              API key {settings?.provider === provider && settings?.maskedKey && `(currently ${settings.maskedKey})`}
+              API key (optional) {settings?.provider === provider && settings?.maskedKey && `(currently ${settings.maskedKey})`}
             </label>
             <div className="relative">
               <input
@@ -168,6 +193,20 @@ export function SettingsPanel({
             </div>
             <p className="text-[11px] text-muted-foreground mt-1.5">
               Stored encrypted. Never shown again after saving — only a masked preview.
+              {KEY_SOURCES[provider] && (
+                <>
+                  {" "}Get one at{" "}
+                  <a
+                    href={KEY_SOURCES[provider].url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline hover:text-foreground"
+                  >
+                    {KEY_SOURCES[provider].label}
+                  </a>
+                  . {KEY_SOURCES[provider].note}
+                </>
+              )}
             </p>
           </div>
 

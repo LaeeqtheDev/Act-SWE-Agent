@@ -5,9 +5,12 @@ import {
   ExternalLink,
   GitFork,
   Star,
-  Zap,
-  Layers,
   Search,
+  Mail,
+  Activity,
+  Briefcase,
+  MessageSquare,
+  Clock,
   CheckCircle2,
   Boxes,
   Database,
@@ -26,9 +29,11 @@ import {
   Cpu,
 } from "lucide-react";
 import { Reveal } from "@/components/landing/reveal";
-import { MetricCounter } from "@/components/landing/metric-counter";
 import { HeroSection } from "@/components/landing/hero-section";
 import { PipelineScroll } from "@/components/landing/pipeline-scroll";
+import { DemoChat } from "@/components/landing/demo-chat";
+import { AuthNav } from "@/components/auth/auth-nav";
+import { Comparison } from "@/components/landing/comparison";
 
 const plexMono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-mono" });
 const plexSans = IBM_Plex_Sans({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--font-sans" });
@@ -37,19 +42,76 @@ const GITHUB_URL = "https://github.com/LaeeqtheDev";
 const LINKEDIN_URL = "https://www.linkedin.com/in/syed-laeeq-ahmed/";
 const REPO_URL = "https://github.com/LaeeqtheDev/Act-SWE-Agent";
 
-const metrics = [
-  { value: 4, label: "microservices simulated", detail: "payments, orders, auth, notifications — real Postgres rows, real Redis events" },
-  { value: 5, label: "model providers supported", detail: "Anthropic, OpenAI, Grok, Groq, and local Ollama — one interface, swap anytime" },
-  { value: 9, label: "tools available to the agent", detail: "service health, K8s, web search, a real browser, local files — 2 of them gated behind approval" },
-  { value: 0, prefix: "$", label: "hosted cost — bring your own key", detail: "self-host is free forever; hosted free tier needs no card either" },
+// Concrete things the agent actually does, in the user's own words —
+// replaces the abstract "4 services / 9 tools" counters, which described
+// the codebase rather than the value.
+const useCases = [
+  {
+    icon: "briefcase" as const,
+    prompt: "Find backend roles at Stripe and apply to the best fit",
+    body: "Browses the careers page, opens each listing, reads the requirements, then fills the application with your saved details — you approve before anything is sent.",
+  },
+  {
+    icon: "mail" as const,
+    prompt: "What came in overnight that actually needs me?",
+    body: "Reads your real inbox in your own logged-in Gmail, separates the noise from what's waiting on you, and drafts replies you review before they go out.",
+  },
+  {
+    icon: "search" as const,
+    prompt: "Compare these three vendors and put it in a doc",
+    body: "Searches, opens each site, pulls out pricing and terms, and writes up the comparison as a document you can actually use.",
+  },
+  {
+    icon: "message" as const,
+    prompt: "Catch me up on the #incidents channel",
+    body: "Opens Slack with your existing session, reads the thread, and tells you what happened and what's still open.",
+  },
+  {
+    icon: "activity" as const,
+    prompt: "Is payments-api healthy? Restart it if not.",
+    body: "Checks live service health and Kubernetes pod status, then proposes the restart — pending your approval, never automatic.",
+  },
+  {
+    icon: "clock" as const,
+    prompt: "Do that every morning at 9",
+    body: "Any of the above becomes a scheduled workflow that runs unattended and remembers what it found last time.",
+  },
 ];
 
+const workflowExamples = [
+  {
+    icon: "mail" as const,
+    cadence: "Every morning",
+    title: "Inbox triage",
+    body: "Read overnight email in your own logged-in Gmail, summarize what actually needs a reply, and flag anything urgent.",
+  },
+  {
+    icon: "search" as const,
+    cadence: "Every 6 hours",
+    title: "Job hunting",
+    body: "Check a company's careers page for new roles matching your stack, and surface only what's actually new since the last run.",
+  },
+  {
+    icon: "activity" as const,
+    cadence: "Every 30 minutes",
+    title: "Service watch",
+    body: "Check service health and Kubernetes pod status, and propose a restart for anything degraded — pending your approval.",
+  },
+];
+
+// Icons are resolved here, inside the server component's own JSX, rather
+// than stored as component references in the array above — React can't
+// serialize a component function across the server/client boundary when
+// these get passed into <Reveal>.
+const workflowIcons = { mail: Mail, search: Search, activity: Activity };
+const useCaseIcons = { briefcase: Briefcase, mail: Mail, search: Search, message: MessageSquare, activity: Activity, clock: Clock };
+
 const pipeline = [
-  { icon: Zap, title: "Simulate", body: "Trigger a realistic failure through a single API call — or just ask the agent to check something." },
-  { icon: Layers, title: "Queue", body: "Raw telemetry is published to Redis via BullMQ, not handled inline." },
-  { icon: Search, title: "Detect", body: "An independent worker applies rule-based detection, or the agent investigates directly from chat." },
-  { icon: ShieldCheck, title: "Approve", body: "Any write action — restart, rollback, a browser click — sits pending until a human says go." },
-  { icon: CheckCircle2, title: "Resolve", body: "The incident closes, the timeline's recorded, and the dashboard reflects what actually happened." },
+  { icon: "zap" as const, title: "Simulate", body: "Trigger a realistic failure through a single API call — or just ask the agent to check something." },
+  { icon: "layers" as const, title: "Queue", body: "Raw telemetry is published to Redis via BullMQ, not handled inline." },
+  { icon: "search" as const, title: "Detect", body: "An independent worker applies rule-based detection, or the agent investigates directly from chat." },
+  { icon: "shield" as const, title: "Approve", body: "Any write action — restart, rollback, a browser click — sits pending until a human says go." },
+  { icon: "check" as const, title: "Resolve", body: "The incident closes, the timeline's recorded, and the dashboard reflects what actually happened." },
 ];
 
 const agentTools = [
@@ -87,6 +149,8 @@ export default function LandingPage() {
       {/* Nav */}
       <nav className="relative z-10 max-w-6xl mx-auto px-6 md:px-8 py-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.svg" alt="" width={26} height={26} className="rounded-md" />
           <span style={{ fontFamily: "var(--font-mono)" }} className="text-sm tracking-widest uppercase text-foreground">
             Act · SWE Agent
           </span>
@@ -110,127 +174,129 @@ export default function LandingPage() {
           <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
             <Star className="h-3.5 w-3.5" /> Star
           </a>
-          <Link href="/agent" className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity">
-            Chat with the agent <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
+          <AuthNav />
         </div>
       </nav>
 
       <HeroSection />
 
-            {/* Metrics */}
+      {/* Live demo — the highest-leverage thing on this page: people try
+          things, they don't read feature lists. */}
+      <section className="border-b border-border">
+        <div className="max-w-3xl mx-auto px-6 md:px-8 py-20">
+          <Reveal className="text-center mb-6">
+            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
+              No signup
+            </p>
+            <h2 className="text-2xl md:text-3xl font-semibold text-foreground">Try it right now.</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              A small read-only slice of the real agent — ask it about the demo services below.
+            </p>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <DemoChat />
+          </Reveal>
+        </div>
+      </section>
+
+      {/* What it does */}
       <section className="border-y border-border bg-card">
-        <div className="max-w-6xl mx-auto px-6 md:px-8 py-14">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
-            {metrics.map((m, i) => (
-              <Reveal key={m.label} delay={i * 0.08}>
-                <MetricCounter value={m.value} prefix={m.prefix} label={m.label} detail={m.detail} />
-              </Reveal>
-            ))}
+        <div className="max-w-6xl mx-auto px-6 md:px-8 py-20">
+          <Reveal>
+            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+              What you can ask it
+            </p>
+            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-2xl">
+              Real requests, handled end to end.
+            </h2>
+            <p className="mt-4 text-sm md:text-base text-muted-foreground max-w-2xl leading-relaxed">
+              Not a chatbot that tells you how to do something. It opens the browser, clicks through,
+              reads what&apos;s there, and comes back with the thing you asked for.
+            </p>
+          </Reveal>
+
+          <div className="mt-12 grid md:grid-cols-2 lg:grid-cols-3 gap-5">
+            {useCases.map((u, i) => {
+              const Icon = useCaseIcons[u.icon];
+              return (
+                <Reveal key={u.prompt} delay={i * 0.06}>
+                  <div className="h-full p-6 rounded-lg border border-border bg-background flex flex-col">
+                    <Icon className="h-5 w-5 text-warn mb-4" />
+                    <p style={{ fontFamily: "var(--font-mono)" }} className="text-sm text-foreground mb-3 leading-snug">
+                      &ldquo;{u.prompt}&rdquo;
+                    </p>
+                    <p className="text-sm text-muted-foreground leading-relaxed flex-1">{u.body}</p>
+                  </div>
+                </Reveal>
+              );
+            })}
           </div>
-          <p className="text-[11px] text-muted-foreground/60 mt-8">Hover a number for what it actually means.</p>
         </div>
       </section>
 
-      {/* Bring your own model */}
+      {/* Comparison */}
       <section className="border-b border-border">
-        <div className="max-w-6xl mx-auto px-6 md:px-8 py-20">
-          <div className="grid lg:grid-cols-[1fr_1.2fr] gap-12">
+        <div className="py-20">
+          <div className="max-w-4xl mx-auto px-6 md:px-8 mb-10">
             <Reveal>
-              <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
-                Bring your own model
+              <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+                The difference
               </p>
-              <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-md">
-                One agent loop. Five backends. Your choice.
+              <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-2xl">
+                Most AI tells you what to do. This does it.
               </h2>
-              <p className="mt-4 text-sm text-muted-foreground max-w-md leading-relaxed">
-                Every provider implements the same interface — swap
-                <code className="mx-1 px-1.5 py-0.5 rounded bg-border text-foreground text-xs">AI_PROVIDER</code>
-                in your <code className="px-1.5 py-0.5 rounded bg-border text-foreground text-xs">.env</code> and restart —
-                no code changes, no vendor lock-in, no key ever leaves your own machine.
-              </p>
-            </Reveal>
-
-            <Reveal delay={0.1} className="grid sm:grid-cols-2 gap-3">
-              {providers.map((p) => (
-                <div key={p.label} className="flex items-center gap-3 p-4 rounded-lg border border-border">
-                  <Cpu className="h-4 w-4 text-warn shrink-0" />
-                  <div>
-                    <p className="text-foreground text-sm font-medium">{p.label}</p>
-                    <p style={{ fontFamily: "var(--font-mono)" }} className="text-muted-foreground text-[11px] mt-0.5">{p.env}</p>
-                  </div>
-                </div>
-              ))}
             </Reveal>
           </div>
+          <Comparison />
         </div>
       </section>
 
-      <PipelineScroll steps={pipeline} />
-
-            {/* Inside the agent */}
-      <section className="border-b border-border bg-card">
-        <div className="max-w-6xl mx-auto px-6 md:px-8 py-20">
-          <Reveal>
-            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
-              Inside the agent
-            </p>
-            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-lg">
-              Real tools. Reads run free. Writes need a human.
-            </h2>
-            <p className="mt-4 text-sm text-muted-foreground max-w-lg leading-relaxed">
-              The agent never touches the database, cluster, or a browser directly for
-              anything that changes state. It calls <code className="mx-1 px-1.5 py-0.5 rounded bg-border text-foreground text-xs">proposeAction</code>,
-              which only creates a pending approval — nothing executes until a person reviews it.
-            </p>
-          </Reveal>
-
-          <div className="mt-10 grid md:grid-cols-2 gap-px bg-border rounded-lg overflow-hidden">
-            {agentTools.map((tool, i) => (
-              <Reveal key={tool.name} delay={i * 0.05} className="bg-background p-5 flex items-start gap-4">
-                <tool.icon className={`h-4 w-4 shrink-0 mt-1 ${tool.gated ? "text-warn" : "text-warn"}`} />
-                <div>
-                  <div className="flex items-center gap-2">
-                    <p style={{ fontFamily: "var(--font-mono)" }} className="text-[13px] text-foreground">{tool.name}()</p>
-                    {tool.gated && (
-                      <span className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-warn border border-warn/40 rounded px-1.5 py-0.5">
-                        <Lock className="h-2.5 w-2.5" /> gated
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-sm text-muted-foreground mt-0.5">{tool.body}</p>
-                </div>
-              </Reveal>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Stack */}
+      {/* Workflows */}
       <section className="border-b border-border">
         <div className="max-w-6xl mx-auto px-6 md:px-8 py-20">
           <Reveal>
-            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
-              Under the hood
+            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+              Workflows
             </p>
-            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-xl">
-              Built with the tools real platforms run on.
+            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-2xl">
+              Give it a schedule and it keeps working without you.
             </h2>
+            <p className="mt-4 text-sm md:text-base text-muted-foreground max-w-2xl leading-relaxed">
+              Describe a task in plain language, pick how often it should run, and the agent handles it
+              unattended — same tools, same browser, same approval gate on anything that writes. Every run
+              of a workflow shares one ongoing conversation, so the tenth run still remembers what the
+              first nine found.
+            </p>
           </Reveal>
 
-          <div className="mt-12 grid sm:grid-cols-2 md:grid-cols-3 gap-4">
-            {stack.map((item, i) => (
-              <Reveal key={item.label} delay={i * 0.05}>
-                <div className="flex items-start gap-3 p-5 rounded-lg border border-border hover:border-border transition-colors h-full">
-                  <item.icon className="h-5 w-5 text-warn shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-foreground text-sm font-medium">{item.label}</p>
-                    <p className="text-muted-foreground text-xs mt-1">{item.note}</p>
-                  </div>
+          <div className="mt-12 grid md:grid-cols-3 gap-5">
+            {workflowExamples.map((w, i) => {
+              const Icon = workflowIcons[w.icon];
+              return (
+              <Reveal key={w.title} delay={i * 0.08}>
+                <div className="h-full p-6 rounded-lg border border-border flex flex-col">
+                  <Icon className="h-5 w-5 text-muted-foreground mb-4" />
+                  <p style={{ fontFamily: "var(--font-mono)" }} className="text-[11px] uppercase tracking-wide text-muted-foreground/60 mb-2">
+                    {w.cadence}
+                  </p>
+                  <h3 className="text-foreground font-medium mb-2">{w.title}</h3>
+                  <p className="text-sm text-muted-foreground leading-relaxed flex-1">{w.body}</p>
                 </div>
               </Reveal>
-            ))}
+              );
+            })}
           </div>
+
+          <Reveal delay={0.3}>
+            <div className="mt-8 flex flex-wrap items-center gap-4">
+              <Link href="/workflows" className="inline-flex items-center gap-2 px-5 py-2.5 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors text-sm">
+                Set up a workflow <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+              <span className="text-xs text-muted-foreground/70">
+                Results land in your notifications — and by email, if you configure SMTP.
+              </span>
+            </div>
+          </Reveal>
         </div>
       </section>
 

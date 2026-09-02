@@ -1,129 +1,110 @@
-# Act SWE Agent
+<div align="center">
+  <img src="apps/web/public/logo.svg" width="64" height="64" alt="" />
+  <h1>Act · SWE Agent</h1>
+  <p><strong>An open-source AI agent that actually does the work — and asks before it changes anything.</strong></p>
+  <p>
+    <a href="#quick-start">Quick start</a> ·
+    <a href="docs/SETUP.md">Setup</a> ·
+    <a href="docs/USAGE.md">Usage</a> ·
+    <a href="docs/HOSTING.md">Hosting</a> ·
+    <a href="docs/ARCHITECTURE.md">Architecture</a>
+  </p>
+  <p><em>MIT licensed · bring your own model · self-host free forever</em></p>
+</div>
 
-**A chat-first, open-source, model-agnostic AI SRE agent.** Point it at Anthropic, OpenAI, Grok (xAI), Groq, or a local Ollama model — bring your own key, nothing hosted, MIT licensed. It talks to you like Claude or ChatGPT, but it can check your services, browse the real web in a real visible browser window, and read/edit this project's own code — with every write action gated behind your explicit approval before it touches anything.
+---
 
-Pieces that need your own cloud credentials, API keys, or hands-on commands are called out in **[NEXT_STEPS.md](./NEXT_STEPS.md)**. See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for adding a new model provider or agent tool.
+Ask it to find jobs at a company and it browses the careers page, clicks
+into the listings, and comes back with real roles. Ask it to apply, and it
+fills the form with your saved details and shows you the completed
+application before anything is submitted.
+
+It drives **your own logged-in Chrome**, so Gmail, LinkedIn, Slack, and
+anything else you're signed into just work — no separate login, no OAuth
+dance, no credentials handed to a third party.
+
+**The one rule:** reading and clicking happen freely. Anything that submits,
+sends, posts, or changes state stops and waits for you. That's what makes it
+safe to hand a vague task and walk away — or schedule it to run unattended.
 
 ---
 
 ## What it does
 
-- **Chat with it** at `/agent` — ask how a service is doing, have it investigate an incident, tell it to look something up, or ask it to open a page for you. It calls real tools and reports back, not a scripted demo.
-- **Watch it browse** — with `BROWSER_HEADLESS=false`, a real Chrome/Chromium window opens on your screen and stays open across the conversation — the agent keeps working in the same window/tab instead of spawning a new one per action. Set `CHROME_USER_DATA_DIR` to hand it your own already-logged-in Chrome profile for a persistent, real session.
-- **Give it write access, safely** — restarting a Kubernetes pod, clicking or filling something in a browser, editing a file, running a shell command: every single one of these only ever creates a *pending* action. Nothing executes until you click approve.
-- **Pick your model from the UI** — a settings panel with a provider grid and model dropdown; paste an API key once and it's stored encrypted, never shown again (just a masked preview).
-- **See the operations picture, not noise** — the dashboard shows what Kubernetes self-healed on its own vs. what actually needed the agent, plus a live feed of every action the agent has proposed or completed.
-- **Simulate real incidents** — a database-overload and a pod-crash-loop scenario, each detected by a different rule (event co-occurrence vs. a restart-count threshold), flowing through a real Redis/BullMQ queue and an independent worker process.
+- **Browses for real** — a visible Chrome window with a visible cursor, using your existing sessions
+- **Finishes tasks** — chains searches, clicks, and reads until it has an actual answer, not a status update
+- **Fills forms** — job applications and contact forms, from details you save once
+- **Runs on a schedule** — unattended workflows that remember what previous runs found
+- **Any model** — Anthropic, OpenAI, Grok, Groq, or fully local Ollama. Your key, swappable from the UI, stored encrypted
+- **Watches itself** — real tool failures from real sessions surface on the dashboard automatically
+- **Never writes without asking** — one approval for a complete action, not a dozen for its parts
 
 ---
 
-## Architecture
-
-```
-Landing Page (Next.js)
-        │
-        ▼
-Chat Console ──────► Express API ──────► PostgreSQL (Prisma ORM)
-   (/agent)                │                    │
-        │                  ▼                    ▼
-        │            Shared Tool Menu      Encrypted Settings
-        │        (DB / K8s / browser /       (BYOK, per-provider)
-        │         local files / propose)
-        │                  │
-        │                  ▼
-        │           AI Provider Layer
-        │       (Anthropic / OpenAI-compatible:
-        │        OpenAI, Grok, Groq, Ollama)
-        │
-        ▼
-Dashboard (/dashboard) ──► Redis Queue (BullMQ) ──► Worker ──► Rule-based Detection
-```
-
-- **Frontend:** Next.js (App Router) + TypeScript + Tailwind + shadcn/ui + GSAP + three.js — a marketing landing page, a chat console with conversation history, and an operations dashboard
-- **Backend:** Express (TypeScript) — chat, incident/service data, simulation, agent investigation, and action approval
-- **AI provider layer:** one interface, swappable at runtime via a settings UI or `AI_PROVIDER` env var — Anthropic natively, everything else (OpenAI, Grok, Groq, Ollama) through a single OpenAI-compatible adapter
-- **Tool menu (shared across chat and incident investigation):** service health, telemetry, incident history, live Kubernetes pod/cluster data, web search, a real browser (with session continuity), local project file read/list/open, and `proposeAction` — the one gate every write goes through
-- **Database:** PostgreSQL via Prisma — services, incidents, chat conversations/messages, agent actions, and encrypted provider settings
-- **Queue:** Redis + BullMQ — the simulator publishes events, an independent worker consumes them and applies detection rules
-- **Containerization:** Docker (multi-stage builds) + Docker Compose
-- **Orchestration:** Kubernetes manifests for all four simulated services, self-healing verified
-
-## Monorepo layout
-
-```
-act-swe-agent/
-├── apps/
-│   ├── web/                   # Next.js — landing, chat console, dashboard
-│   └── api/
-│       └── src/
-│           ├── providers/       # AI provider abstraction (Anthropic + OpenAI-compatible)
-│           ├── tools/            # Shared tool menu: browser, search, k8s, devtools
-│           ├── chat.ts            # Conversational agent loop
-│           ├── agent.ts           # Incident-investigation agent loop
-│           └── settings.ts         # Encrypted BYOK provider settings
-├── packages/types/              # Shared TypeScript types
-├── infrastructure/
-│   ├── kubernetes/               # K8s manifests + image-load helper script
-│   └── aws/                       # Terraform scaffold (EKS, RDS, ElastiCache, ECR)
-├── observability/                  # Prometheus + OTel Collector config
-├── .github/workflows/                # CI/CD pipeline
-└── docker-compose.yml
-```
-
-Managed with **Turborepo + pnpm workspaces**.
-
----
-
-## Features implemented
-
-- ✅ **Chat console** (`/agent`) — multi-conversation sidebar, auto-titled chats, tool-call trace shown inline, persisted history
-- ✅ **Provider-agnostic AI layer** — Anthropic, OpenAI, Grok, Groq, Ollama, selectable from the UI with an encrypted key store (AES-256-GCM), masked after saving
-- ✅ **Real browser tool** — visible window, persistent single-tab session across a conversation, graceful recovery if you close it, capped output sizes to survive small free-tier rate limits
-- ✅ **Web search** (no API key needed) + **local dev tools** (read/list project files, open in VS Code, propose file edits and shell commands — opt-in, gated)
-- ✅ **Permission layer** — every write (pod restart, rollback, browser click/fill, file edit, shell command) is a pending `AgentAction` until a human approves it
-- ✅ **Operations dashboard** — self-healed vs. agent-handled vs. needs-attention, derived from real data, plus a global agent-activity feed with inline approve/reject
-- ✅ **Event-driven backend** — simulator → Redis queue → independent worker → rule-based detection → incident
-- ✅ **Full Docker Compose stack** including the worker as its own container
-- ✅ **Kubernetes manifests** for all four services, self-healing proven
-- ✅ **Terraform scaffold** for AWS (EKS/RDS/ElastiCache/ECR) — reviewed, not yet applied
-- ✅ **GitHub Actions CI/CD** — lint/build/Docker-build on every push; deploy activates once AWS secrets are set
-- ✅ **Landing page** — scroll-scrubbed three.js hero, pinned horizontal pipeline section, About/Case Studies/Docs pages, pricing tiers
-
-## What's left — see [NEXT_STEPS.md](./NEXT_STEPS.md)
-
-Honest list of what's real but needs your own setup: running the latest Prisma migrations, generating a settings encryption key, installing Playwright's browser binary, setting `CHROME_USER_DATA_DIR` for persistent logins, applying the Kubernetes manifests, reviewing and applying the Terraform scaffold, adding CI/CD secrets, and finishing OTel instrumentation.
-
-**Now built (opt-in, off by default):** Clerk auth + usage limits (10 free tasks/month, 500 on Pro), Stripe checkout, a manually-reviewed bank-transfer path, and premium-model gating by plan — see [NEXT_STEPS.md](./NEXT_STEPS.md) #17-19. Self-hosting is completely unaffected; `HOSTED_MODE` stays unset and none of this code path ever runs.
-
-**Not yet built:** fine-tuning, a UI for reviewing bank-transfer receipts (currently admin API calls), Stripe customer-portal cancellation.
-
----
-
-## Running it locally
-
-**Prerequisites:** Node.js 20+, pnpm, Docker Desktop
+## Quick start
 
 ```bash
 git clone https://github.com/LaeeqtheDev/Act-SWE-Agent.git
 cd Act-SWE-Agent
 pnpm install
 docker compose up postgres redis -d
+
+cp apps/api/.env.example apps/api/.env    # add one AI provider key
 cd apps/api && pnpm exec prisma migrate dev && cd ../..
-cp apps/api/.env.example apps/api/.env   # add at least one AI provider key
-pnpm --filter api dev      # terminal 1
-pnpm --filter api worker   # terminal 2
-pnpm --filter web dev      # terminal 3
+
+pnpm --filter api dev       # :4000
+pnpm --filter api worker    # detection worker
+pnpm --filter web dev       # :3000
 ```
 
-- Landing page: [http://localhost:3000](http://localhost:3000)
-- Chat: [http://localhost:3000/agent](http://localhost:3000/agent)
-- Dashboard: [http://localhost:3000/dashboard](http://localhost:3000/dashboard)
-- API: [http://localhost:4000](http://localhost:4000)
+Open http://localhost:3000/agent.
 
-Full setup notes — the browser/session options, local dev tools opt-in, Kubernetes, AWS — are in **[NEXT_STEPS.md](./NEXT_STEPS.md)**.
+Full walkthrough, including using your real browser: **[docs/SETUP.md](docs/SETUP.md)**
 
 ---
 
-## Why this project
+## Stack
 
-Real interview conversations about "have you worked with Kubernetes?" or "tell me about an AI agent you built" are a lot more convincing backed by something you can actually walk through — the architecture decisions, the failure modes you hit, and how you debugged them — than a line on a CV. This project exists to make those conversations concrete.
+**Frontend** Next.js 16 · TypeScript · Tailwind · shadcn/ui · GSAP · three.js
+**Backend** Express · Prisma · PostgreSQL · Redis + BullMQ · Playwright
+**Infra** Docker Compose · Kubernetes manifests · Terraform (AWS) · GitHub Actions
+**Hosted extras** Clerk · Stripe · Prometheus · SMTP
+
+Turborepo + pnpm workspaces.
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| **[Setup](docs/SETUP.md)** | Install, configure, run, troubleshoot |
+| **[Usage](docs/USAGE.md)** | What the agent can do, and where the boundaries are |
+| **[Hosting](docs/HOSTING.md)** | Auth, billing, limits — all opt-in |
+| **[Architecture](docs/ARCHITECTURE.md)** | How it works, how to add providers and tools |
+| **[Changelog](docs/CHANGELOG.md)** | Full development history |
+
+---
+
+## Honest status
+
+**Working and tested:** the agent loop, browser automation, workflows,
+notifications, encrypted BYOK, the permission layer, dashboard, demo widget,
+metrics, and 23 passing unit tests.
+
+**Built but not battle-tested:** Clerk auth, Stripe billing, and email
+delivery all typecheck and build clean, but haven't run against production
+credentials — that's the next step, not a claim.
+
+**Not built:** actual model fine-tuning (the training-data export at
+`/admin/export-training-data` is the honest, buildable piece), and
+integration tests against a real database.
+
+---
+
+## License
+
+MIT. Fork it, self-host it, sell services on it — no limits, no attribution
+required.
+
+Built by [Syed Laeeq Ahmed](https://github.com/LaeeqtheDev) · [LinkedIn](https://www.linkedin.com/in/syed-laeeq-ahmed/)

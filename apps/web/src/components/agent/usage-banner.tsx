@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Zap } from "lucide-react";
+import { isHostedMode } from "@/lib/hosted-mode";
 
 interface Usage {
   hosted: boolean;
@@ -18,11 +19,15 @@ export function UsageBanner({ apiUrl, getToken }: { apiUrl: string; getToken?: (
 
   useEffect(() => {
     (async () => {
+      // Same reason as the notification bell: this endpoint needs auth in
+      // hosted mode, so firing before the token exists guarantees a 401.
+      if (isHostedMode() && typeof getToken !== "function") return;
       try {
         const token = getToken ? await getToken() : null;
         const res = await fetch(`${apiUrl}/usage`, {
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
         });
+        if (!res.ok) return;
         setUsage(await res.json());
       } catch {
         // API unreachable — just don't show the banner rather than break the page.

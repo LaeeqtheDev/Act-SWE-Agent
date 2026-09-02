@@ -35,7 +35,7 @@ pnpm --filter api worker   # terminal 2
 pnpm --filter web dev      # terminal 3`}</CodeBlock>
         <p className="text-sm text-muted-foreground mt-2">
           Full setup notes, including the local browser and dev-tools opt-ins, live in{" "}
-          <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">NEXT_STEPS.md</code> in the repo.
+          <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">docs/SETUP.md</code> in the repo.
         </p>
       </section>
 

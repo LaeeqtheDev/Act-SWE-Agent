@@ -713,3 +713,490 @@ stale build (restart the API) or the model itself not following
 instructions perfectly (smaller/faster models like `gpt-oss-20b` are more
 prone to this than larger ones — worth trying a bigger model if it
 persists).
+
+---
+
+## 23. Landing page demo widget + platform-aware browsing (this update)
+
+**No-signup demo widget.** `/` now has a live, working chat right on the
+landing page — "Try it right now," no signup. It talks to a real agent, but
+a deliberately small one: read-only access to the demo services/incidents
+only, 3-turn tool loop cap, and a hard **6 messages per IP per hour** limit.
+
+**Read this before deploying hosted:** this endpoint runs against
+*your* configured provider key with no auth in front of it — the rate
+limit is the only thing stopping a stranger from burning your API budget.
+It's in-memory (resets on restart, and isn't shared across multiple server
+instances if you ever scale horizontally) — fine for a single-instance
+deploy, worth swapping for a Redis-backed limiter if you scale beyond that.
+Tune `RATE_LIMIT` / `WINDOW_MS` in `apps/api/src/demo.ts` if you want it
+stricter or looser.
+
+Seed data matters here — the demo has nothing interesting to say about
+services that don't exist:
+```bash
+cd apps/api
+pnpm exec prisma db seed
+```
+
+**Browser tool — now actually usable for Gmail/Calendar/Docs/LinkedIn/Slack.**
+`browseWeb` returns a list of real, clickable elements on the page
+(`interactiveElements`), each with a Playwright-native selector
+(`role=button[name="Send"]`, `text="Post"`) instead of the agent guessing at
+CSS that doesn't exist. Both system prompts now explicitly tell the agent:
+browse the page first, use the selector it's given, don't invent one. This
+is what makes "click Send in Gmail" or "post this on LinkedIn" reliable
+instead of a coin flip — set `CHROME_USER_DATA_DIR` (see step 11) and these
+work through the same real, logged-in browser as everything else.
+
+**Fair warning, not a blocker:** most platforms' Terms of Service technically
+restrict automated interaction with their site (LinkedIn and Slack
+especially). This is the same risk profile as any personal browser
+automation — real, but account-level, not something that stops the code
+from working. Keep action volume modest, especially on LinkedIn, until this
+moves to real OAuth integrations later.
+
+---
+
+## 24. Audit findings + product-direction fix (this update)
+
+**Two real bugs, found and fixed:**
+1. **Page auto-scrolled to the demo widget on load.** Both the landing demo
+   and `/agent` had the same bug: a `useEffect` that scrolls to the newest
+   message fired on the very first mount too (empty message list still
+   counts as a "change"), yanking the whole page down to that chat box the
+   instant it loaded. Fixed in both places — the scroll only fires once
+   there's an actual conversation.
+2. **Demo widget was cramped.** Made it bigger — taller, wider container,
+   larger text and touch targets.
+
+**The bigger thing — you're right, and this needed a real fix, not a
+relabel.** The dashboard was built entirely around the payments-api/
+orders-api simulator, which no longer matches what this product actually
+is: a browsing, tool-using agent. Rather than tear out the simulator
+(it's genuinely good, working infra — real Postgres, real Redis queue, real
+Kubernetes self-healing, worth keeping as a demonstration), I added what
+you were actually describing as its own real thing:
+
+- **`AgentIncident`** — a new, separate model from the simulator's
+  `Incident`. Whenever a tool the agent *actually* calls during a real chat
+  or investigation fails — a `browseWeb` that couldn't complete, a shell
+  command that exits non-zero, the AI provider itself erroring out mid-task
+  — it's logged here automatically, tied to that session
+- **Dashboard restructured**: "Live agent issues" is now the first thing on
+  the page — genuine, real, auto-detected. Everything simulator-related got
+  pushed below a divider and explicitly relabeled "Simulated detection
+  pipeline (demo)" so it's clear that's a showcase of the mechanics, not
+  the product itself
+- Landing page's metric label updated to match: "demo services for the
+  detection pipeline" instead of implying they're the core offering
+
+**New migration** (adds `AgentIncident`):
+```bash
+cd apps/api
+pnpm exec prisma migrate dev --name add_agent_incidents
+```
+
+### On "comprehensive audit, fix everything"
+
+I want to be precise about what that actually means here rather than
+claim something I can't back up: I re-typechecked both apps clean, ran a
+real `next build` that compiles every route, and traced through the fixes
+above by reading the actual code paths, not guessing. What I have **not**
+done is exercise every feature live end-to-end myself (I don't have a
+running instance with real Stripe/Clerk/provider keys) — so "comprehensive"
+here means "I checked what I can verify without live credentials, and
+fixed two real bugs I found doing it," not "I've personally clicked through
+every button." Your own pass through the app, now that the two structural
+fixes above are in, is still the real test — and now that live agent
+issues get logged automatically, if something's actually broken in a real
+session, it'll show up on the dashboard for you to see.
+
+---
+
+## 25. Workflows, notifications, full task continuation, more platforms (this update)
+
+**Workflows — real scheduling, not a mockup.** `/workflows` lets you create
+a task the agent repeats unattended: "Check my LinkedIn for messages every
+hour," "Check payments-api health every 30 minutes." Runs go through the
+**exact same agent loop as a real chat** — same tools, same permission gate
+on every write. A schedule triggering it is the only difference from you
+typing it yourself. Built on `node-cron`, running in-process in the API
+server:
+- Each workflow keeps **one ongoing conversation across all its runs** — the
+  tenth run genuinely remembers what the first nine found, not a fresh
+  start each time
+- Schedules survive a server restart (re-registered from the database on boot)
+- Create/enable/disable/run-now/delete, all from `/workflows`
+
+**Notifications — in-app, polled, honest about what it isn't yet.** A bell
+icon in the chat header, polls every 30 seconds, shows unread count, links
+straight to the relevant conversation. This is the reliable baseline. It is
+**not yet** email, browser push, or Slack delivery — those need a
+transactional email service or a service worker + VAPID keys, which is
+real additional infrastructure I didn't want to fake by pretending an
+in-app-only notification is "sent." `createNotification()` in
+`notifications.ts` is where you'd hook in an actual email/push send later —
+the call site is already there, the delivery mechanism isn't.
+
+**Full task continuation.** The turn limit that got dropped from 6→4 during
+the Groq-rate-limit fight is now `AGENT_MAX_TURNS` (default 8), so a
+multi-step task ("look this up, then act on it, then confirm") doesn't get
+cut off in the middle. **If you're running a small free-tier model** (like
+`gpt-oss-20b` on Groq's 8,000 TPM tier), consider setting
+`AGENT_MAX_TURNS=4` explicitly to avoid the same 413 rate-limit crash from
+before — the history-compaction fix helps, but a genuinely long task can
+still add up. Bigger models / paid tiers can leave it at 8 or raise it.
+
+**More platforms.** The system prompt now explicitly lists Facebook,
+Instagram, and WhatsApp Web alongside the existing Gmail/Calendar/Docs/
+LinkedIn/Slack — and states plainly that *any* site the user's Chrome
+profile is logged into works the same way. **The permission gate is
+explicitly called out as applying without exception across every one of
+these** — restated directly in the prompt specifically because workflows
+now let the agent run unattended, and that's exactly the scenario where an
+unambiguous "no write without approval, ever" instruction matters most.
+
+### New migration (Workflow, WorkflowRun, Notification tables)
+```bash
+cd apps/api
+pnpm exec prisma migrate dev --name add_workflows_and_notifications
+```
+
+### Setting one up
+1. Set `CHROME_USER_DATA_DIR` if the workflow needs a logged-in session
+   (checking LinkedIn, Gmail, etc.) — see step 11
+2. Go to `/workflows` → New → describe the task in plain language → pick a
+   schedule → Create
+3. Hit the play icon to test it immediately instead of waiting for the
+   schedule
+4. Check the bell icon after it runs
+
+### Honest caveat, same pattern as everything else
+
+Typechecked clean on both apps, a real `next build` pass, and I traced the
+scheduler logic by reading it rather than guessing — but this has not run
+against a live cron trigger firing for real, over real time, against a
+real Chrome session on your machine. First real scheduled run is the
+actual proof, same as every hosted-mode piece before it.
+
+---
+
+## 26. The real "it doesn't finish, keeps asking for approval" fix (this update)
+
+Four real, distinct problems in what you saw — not one bug, four:
+
+**1. It genuinely never continued after approval — this was a real gap, now fixed.**
+Approving an action only ever appended a static "here's what happened"
+message to the chat. Nothing then re-invoked the agent. You had to type
+"please continue" yourself every single time, which is exactly what you saw
+in the Stripe/PayPal example. Fixed: `resumeAfterAction()` now runs a REAL
+next turn the moment an action completes — the agent can propose the next
+step (still gated behind its own approval — this never bypasses that) or
+give you the final answer, entirely on its own. A chain of up to 5
+automatic continuations is allowed before it needs one manual nudge, as a
+safety cap against a model that never stops proposing things.
+
+**2. It was asking for approval on things that didn't need it — also real, also fixed.**
+Clicking a plain link (like Stripe's "Open Roles") was going through the
+full propose→approve gate for no reason — following a link is just
+navigation, the same as calling browseWeb with a different URL. Fixed:
+`browseWeb` now returns each link's actual href, and both the tool
+description and system prompt tell the agent to navigate there directly
+instead of proposing a gated click. The approval gate now applies
+specifically to things that submit, send, post, or change something —
+which is the right scope for it, not "any click anywhere."
+
+**3. "I didn't see mouse or typing" — almost certainly a config gap, not a code bug.**
+The visible-cursor/mouse-movement/character-typing feature only activates
+when `BROWSER_HEADLESS="false"` is actually set in your `apps/api/.env`.
+`.env.example` defaults to this now, but if your real `.env` was created in
+an earlier round before that default existed, it may still be missing —
+**check this specifically** and restart the API if you add it.
+
+**4. "Couldn't reach the API... Failed to fetch"** — I can't diagnose this
+one without the actual API terminal output from that moment (I added
+`console.error` logging specifically so it's visible next time), but I did
+find and fix a real category of risk while looking: added a global
+`unhandledRejection` handler so a single missed `.catch()` anywhere can't
+silently take the whole server down anymore, and added the same
+`console.error` logging to the `/actions/:id/approve` route that was
+missing it. **If this happens again, paste the exact API terminal output**
+— now it'll actually say why.
+
+### Also: Google search results specifically are a hard case, not a bug
+
+Google actively fights automated browsers — CAPTCHAs, JS-heavy rendering,
+bot detection — so scraping google.com/search directly is inherently
+unreliable, headless or not. For anything like "find me jobs at X," the
+agent does much better going straight to the destination (a company's own
+careers page, or `webSearch` which uses DuckDuckGo's plain HTML results)
+than trying to read Google's search results page. This is a structural
+limitation of scraping search engines in general, not something a prompt
+tweak fixes — worth knowing rather than expecting it to just start working.
+
+No new migration for this update — pure application logic.
+
+---
+
+## 27. Completing the audit list (this update)
+
+Working through everything flagged as "missing" — here's what's real now,
+and what's honestly still a next step.
+
+### Done
+
+**Real observability.** `/metrics` now emits genuine Prometheus data — HTTP
+request counts/duration, tool calls (by name and outcome), chat messages,
+agent actions (by type/status), workflow runs. The Prometheus/Grafana
+config that's been scaffolded for a while now has something real to graph.
+
+**Email notifications, honestly scoped.** SMTP via `nodemailer` — works
+with Gmail, SendGrid, Resend, SES, anything SMTP-compatible. Genuinely
+sends when configured (`SMTP_HOST`/`SMTP_USER`/etc.), silently no-ops when
+it isn't — never a fake "sent" status either way. Also closed a real gap
+this depended on: `User.email` was never actually being populated from
+Clerk; it now backfills once and caches it.
+
+**Workflow failure backoff.** Three consecutive failures auto-disables a
+workflow and sends a clear "here's why, go fix it" notification, instead of
+quietly failing on schedule forever.
+
+**Pluggable receipt storage.** Local disk by default (zero config).
+Set `S3_BUCKET` (+ friends) to switch to real object storage — works with
+AWS S3, Cloudflare R2, or MinIO via `S3_ENDPOINT`. This is the actual fix
+for "files vanish on redeploy without a persistent volume."
+
+**A real test suite**, not a token gesture — 16 tests across 4 files,
+all passing:
+- The TPM rate-limit mitigation (`compactHistoryForRequest`) — truncates
+  older tool results, keeps recent ones full, never mutates the original
+- The Phase 6 premium-model gate (`isPremiumModel`) and provider catalog
+  consistency
+- The demo widget's per-IP rate limiter
+- **The encryption round-trip that protects every pasted API key** — encrypts
+  and decrypts correctly, never leaks plaintext into the ciphertext string,
+  produces different output for the same input each time (random IV), and
+  fails closed (throws) on tampered ciphertext instead of returning garbage
+
+Getting these to actually run surfaced a real architecture fix along the
+way: several "pure" functions lived in files that transitively imported
+`PrismaClient` at module scope, so importing them for a unit test required
+a live, generated Prisma client — which needs a real `DATABASE_URL`, unlike
+what a unit test should need. Fixed properly: extracted the genuinely
+DB-free logic into `src/lib/` (`history.ts`, `crypto.ts`) with zero Prisma
+dependency, re-exported from their original locations so nothing else
+changes. Added a Prisma-mocking test setup (`__tests__/setup.ts`) as a
+backstop for anything that still transitively touches it.
+
+```bash
+cd apps/api
+pnpm exec vitest run
+```
+
+**Fine-tuning — scoped honestly, not faked.** Actually training a model
+needs real infrastructure (a training job, GPU time or a provider's
+fine-tuning API, hosting the resulting weights) that doesn't exist here and
+isn't something to pretend. What's real and shipped:
+`GET /admin/export-training-data` exports your own conversation history as
+JSONL in the standard format OpenAI's (and most providers') fine-tuning
+APIs expect. **Real limitation, stated plainly in the code and here**: it
+only exports plain user/assistant text exchanges — tool-calling turns (most
+of what this agent actually does) are skipped, because representing them
+correctly needs provider-specific function-calling training formats that
+differ enough between Anthropic/OpenAI/Groq that a one-size export would be
+misleading. This is a starting point for text-only fine-tuning, not a
+finished tool-use training pipeline.
+
+### New migration (Workflow.consecutiveFailures)
+```bash
+cd apps/api
+pnpm exec prisma migrate dev --name add_workflow_backoff
+```
+
+### Still genuinely not done
+
+- **Stripe downgrade UI** — functionally covered already (the customer
+  portal button on `/billing` handles cancel/downgrade via Stripe's own
+  hosted page), just never got a dedicated in-app button of its own
+- **A real domain + HTTPS** — required for Stripe webhooks and Clerk
+  redirects to work at all; this is on you when you actually deploy, not
+  something buildable from here
+- **Integration tests against a real database** — the unit test suite above
+  is real and passing, but it deliberately doesn't touch Prisma; testing
+  the actual DB-backed logic (usage limits, ownership checks, workflow
+  scheduling) needs a real test database and seeded fixtures, which is a
+  meaningfully bigger effort than what's here
+
+---
+
+## 28. The last two items (this update)
+
+**Stripe downgrade — a real in-app button now.** `/billing` shows your
+actual plan status (fetched from `/usage`) and, if you're on Pro, a
+**"Downgrade to Free"** button that cancels directly — no redirect to
+Stripe's portal required for the single most common thing someone wants to
+do. It cancels at the end of the current billing period (standard SaaS
+behavior: you keep what you paid for), and the existing webhook
+(`customer.subscription.deleted`) flips the plan to free for real once that
+period ends — nothing new needed there, it already handled this correctly.
+The portal link is still there, relabeled to what it's actually for now:
+updating a card or viewing invoices.
+
+**Integration-style tests — as real as this project can get without a live
+database.** A pure-function unit test can't catch bugs in the actual
+DB-touching business logic (an off-by-one in a usage limit, a wrong plan
+resolved, a period reset firing at the wrong time). Added 7 tests against
+`checkAndIncrementUsage`/`getUsage` using a fully mocked Prisma client
+(`vitest-mock-extended`) — the real logic in `usage.ts` runs for real, the
+database calls are swapped for controllable mocks. This caught nothing
+broken right now, but it's exactly the kind of test that would catch it if
+someone changed the limit logic later. **This is still not a true
+integration test against a real Postgres** — that needs a real test
+database and seeded fixtures, a genuinely bigger effort, honestly still not
+done. What's here is the realistic middle ground: real business logic,
+mocked data layer.
+
+```bash
+cd apps/api
+pnpm exec vitest run
+```
+23 tests, 5 files, all passing.
+
+### What's left, for real this time
+
+- **A true integration test suite against a real database** — the one
+  item from the original audit that's still genuinely open. Everything
+  else from every round of "what's missing" is now built.
+- **A real domain + HTTPS, and your actual Stripe/Clerk keys** — these were
+  never things I could do for you; they're the actual next step now that
+  everything else is in place.
+
+---
+
+## 29. Fixed: "Publishable key is missing" from clerkMiddleware (this update)
+
+Real gap in the setup docs, not a code bug: `@clerk/express`'s
+`clerkMiddleware()` needs **both** `CLERK_SECRET_KEY` and
+`CLERK_PUBLISHABLE_KEY` set server-side in `apps/api/.env` — the earlier
+instructions only mentioned the secret key. `.env.example` now includes
+both. Add:
+```
+CLERK_PUBLISHABLE_KEY="pk_test_..."
+```
+— the same `pk_test_`/`pk_live_` value already in `apps/web/.env` as
+`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, just without that prefix — then
+restart the API.
+
+---
+
+## 30. Fixed: "Failed to fetch" was a hanging request, not a network error (this update)
+
+**Root cause of your errors:** `prisma.workflow` and `prisma.notification`
+were `undefined` — the Prisma Client hadn't been regenerated since the
+Workflow/Notification/AgentIncident schema additions from the last few
+rounds. Run this to catch up on everything pending at once:
+```bash
+cd apps/api
+pnpm exec prisma migrate dev
+```
+(no `--name` needed — it applies every pending migration in one go)
+
+**Why it showed up as "Failed to fetch" in the browser, not a clear error:**
+a few routes (`/notifications`, `/chat/conversations`, and likely others
+added across recent rounds) weren't wrapped in try/catch. When the query
+inside them threw, the request never got a response at all — not an error
+response, no response, ever — which is exactly what "Failed to fetch"
+means in the browser: not "the server said no," but "nothing ever came
+back." Fixed properly, systemically, not by patching each route one at a
+time: added `express-async-errors` (patches Express so any thrown/rejected
+error in an async route handler reaches a central error handler) plus one
+global error-handling middleware at the end of `index.ts`. From now on,
+any route that breaks — this bug, or a future one — returns a real `500`
+with an actual error message instead of hanging silently.
+
+---
+
+## 31. Fixed: express-async-errors was incompatible with Express 5 (this update)
+
+The `express-async-errors` package added last round crashed the API on
+startup: `Cannot find module 'express/lib/router/layer'`. Real cause — that
+package pokes at Express 4's internal file layout to patch in async error
+handling, and this project runs **Express 5** (`^5.2.1`), which restructured
+its router internals in that exact way. The package isn't just unneeded
+here, it's actively broken against this version.
+
+**The good news: it was never necessary in the first place.** Express 5 has
+native async error handling — any thrown or rejected error inside an async
+route handler is automatically forwarded to error-handling middleware,
+no patch required. Removed the package entirely; the global error handler
+added last round works exactly the same without it, since it was always
+relying on standard Express error-middleware behavior, which Express 5
+provides natively.
+
+No action needed on your end beyond pulling this update — `pnpm install`
+will remove the broken dependency automatically.
+
+---
+
+## 32. Autonomy, form filling, UI fixes, branding (this update)
+
+### The crash
+`conversations.map is not a function` — in hosted mode the endpoint returns
+`{error: ...}` on 401 instead of an array, and that object was being set as
+state directly. Fixed at the source (validate the shape before setting) and
+defensively in the sidebar itself.
+
+### Hosted mode not switching to login
+Real bug: `proxy.ts` read `NEXT_PUBLIC_HOSTED_MODE` at module scope, so the
+value got captured once and flipping it in `.env` didn't take effect. Now
+read per-request — a server restart is enough.
+
+### Bank details not showing
+Real bug: `getBankDetails()` required BOTH `BANK_NAME` and
+`BANK_ACCOUNT_TITLE` and returned `null` otherwise — so setting just the
+account number and IBAN (what someone actually needs to send a transfer)
+displayed nothing. Now shows the section if ANY field is set.
+
+### Agent autonomy — the big one
+
+Two new ungated tools, because the old behavior (an approval to click "Open
+roles") was genuinely wrong:
+- **`clickToNavigate`** — clicks buttons/tabs/"next page"/"show more" and
+  returns the resulting page's content and elements in one call. No
+  approval, ever: navigation changes nothing.
+- **`getUserProfile`** — the user's saved details (name, email, phone,
+  links, resume text) so forms get filled with real information instead of
+  the agent asking them to retype it.
+
+And a new gated action type:
+- **`form_fill`** — fills an ENTIRE form and optionally submits it as ONE
+  approval. Applying to a job is now one thing to review and accept, not a
+  dozen field-by-field approvals.
+
+The system prompt was rewritten around finishing tasks: browse, click
+through, read, and come back with the actual answer — only stopping for
+approval when something is genuinely submitted, sent, posted, or applied.
+
+**Set your details at `/profile` (API: `GET`/`POST /profile`)** so form
+filling works. The mouse cursor, smooth movement, and character-by-character
+typing all apply to form fills too, when `BROWSER_HEADLESS="false"`.
+
+**What has NOT changed, deliberately:** anything that submits, sends, posts,
+or applies still requires your approval. That boundary is what makes
+unattended workflows safe to run at all — and it's why `form_fill` shows you
+every value before it's entered rather than just doing it.
+
+### New migration (UserProfile table)
+```bash
+cd apps/api
+pnpm exec prisma migrate dev --name add_user_profile
+```
+
+### UI and branding
+- Chat header buttons properly aligned in a consistent icon row
+- Notification panel rebuilt: header with unread count, "mark all read",
+  click-outside-to-close, real empty state, unread dots
+- New logo (`/logo.svg`) + favicon, replacing the Next.js defaults
+- Landing page: logo in nav, and a **Workflows section** with three concrete
+  scheduled-task examples

@@ -1,8 +1,9 @@
-import Link from "next/link";
+import { AppNav } from "@/components/app-nav";
 import { IncidentsSection } from "@/components/incidents-section";
 import { AgentActivity } from "@/components/agent-activity";
+import { AgentIncidentsPanel } from "@/components/agent-incidents-panel";
 import { Card, CardContent } from "@/components/ui/card";
-import { Bot, ArrowLeft, Sparkles, ShieldAlert, CircleCheck, Clock } from "lucide-react";
+import { Bot, ArrowLeft, Sparkles, ShieldAlert, CircleCheck, Clock, Activity, FlaskConical } from "lucide-react";
 import type { Service, Incident } from "@sentinelops/types";
 
 const API_URL = process.env.API_URL_INTERNAL || "http://localhost:4000";
@@ -38,10 +39,6 @@ export default async function DashboardPage() {
   const [services, incidents, actions] = await Promise.all([getServices(), getIncidents(), getActions()]);
   const publicApiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
-  // Every real distinction below comes straight from the data: an incident
-  // has an AgentAction attached only if the agent (chat or an "Investigate")
-  // actually touched it. No AgentAction means Kubernetes' own self-healing
-  // and the detection rules handled it end to end, with no agent involved.
   const incidentIdsTouchedByAgent = new Set(actions.map((a) => a.incidentId).filter(Boolean));
   const selfHealed = incidents.filter((i) => i.status === "resolved" && !incidentIdsTouchedByAgent.has(i.id)).length;
   const agentHandled = incidents.filter((i) => incidentIdsTouchedByAgent.has(i.id)).length;
@@ -57,23 +54,32 @@ export default async function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-background">
-      <div className="border-b">
-        <div className="max-w-5xl mx-auto px-8 py-6 flex items-center justify-between">
-          <div>
-            <Link href="/agent" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-1">
-              <ArrowLeft className="h-3 w-3" /> Back to chat
-            </Link>
-            <h1 className="text-2xl font-bold tracking-tight">Operations</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">What Kubernetes handled on its own, and what needed the agent</p>
-          </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-            Live
-          </div>
-        </div>
+      <AppNav />
+
+      <div className="max-w-5xl mx-auto px-8 pt-8">
+        <h1 className="text-2xl font-bold tracking-tight">Activity</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          What the agent&apos;s actually doing, and what it&apos;s caught along the way
+        </p>
       </div>
 
       <div className="max-w-5xl mx-auto px-8 py-8 space-y-10">
+        {/* Real, live — issues the agent hit doing actual work: a browse
+            that failed, a tool that errored, a session that broke. This is
+            the primary section on purpose; the simulated pipeline below is
+            a demo, this is the real thing. */}
+        <section>
+          <div className="flex items-center gap-2 mb-1">
+            <Activity className="h-4 w-4 text-muted-foreground" />
+            <h2 className="text-lg font-semibold">Live agent issues</h2>
+          </div>
+          <p className="text-xs text-muted-foreground mb-3">
+            Real failures from real sessions — a browse that couldn&apos;t complete, a tool that errored, a
+            provider that timed out. Detected automatically as the agent works, not simulated.
+          </p>
+          <AgentIncidentsPanel apiUrl={publicApiUrl} />
+        </section>
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {stats.map((stat) => (
             <Card key={stat.label}>
@@ -100,33 +106,52 @@ export default async function DashboardPage() {
           <AgentActivity apiUrl={publicApiUrl} />
         </section>
 
-        <section>
-          <h2 className="text-lg font-semibold mb-3">Services</h2>
-          <div className="grid grid-cols-2 gap-4">
-            {services.map((service) => (
-              <Card key={service.id}>
-                <CardContent className="flex justify-between items-center p-4">
-                  <span className="font-medium">{service.name}</span>
-                  <span className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <span className={`h-2 w-2 rounded-full ${statusColor[service.status]}`} />
-                    {service.status}
-                  </span>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        </section>
+        {/* The simulated demo services/incidents only render when they
+            actually exist — clearing them with `pnpm clear-demo` should
+            leave no trace, not empty headers with nothing under them. */}
+        {services.length > 0 && (
+          <div className="pt-4 border-t border-dashed">
+            <div className="flex items-center gap-2 mb-1">
+              <FlaskConical className="h-4 w-4 text-muted-foreground" />
+              <h2 className="text-sm font-medium text-muted-foreground">Simulated detection pipeline (demo)</h2>
+            </div>
+            <p className="text-xs text-muted-foreground/70 mb-6">
+              Seeded sample services demonstrating the queue/worker/Kubernetes-detection mechanics.
+              Remove them any time with <code className="bg-muted px-1 py-0.5 rounded">pnpm clear-demo</code> in apps/api.
+            </p>
 
-        <section>
-          <div className="flex items-center gap-2 mb-1">
-            <CircleCheck className="h-4 w-4 text-muted-foreground" />
-            <h2 className="text-lg font-semibold">Incident timeline</h2>
+            <section className="mb-8">
+              <h3 className="text-sm font-medium text-muted-foreground mb-3">Services</h3>
+              <div className="grid grid-cols-2 gap-4">
+                {services.map((service) => (
+                  <Card key={service.id}>
+                    <CardContent className="flex justify-between items-center p-4">
+                      <span className="font-medium">{service.name}</span>
+                      <span className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <span className={`h-2 w-2 rounded-full ${statusColor[service.status]}`} />
+                        {service.status}
+                      </span>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            </section>
+
+            {incidents.length > 0 && (
+              <section>
+                <div className="flex items-center gap-2 mb-1">
+                  <CircleCheck className="h-4 w-4 text-muted-foreground" />
+                  <h3 className="text-sm font-medium text-muted-foreground">Incident timeline</h3>
+                </div>
+                <p className="text-xs text-muted-foreground/70 mb-3">
+                  Every simulated incident, whether Kubernetes&apos; own self-healing closed it out or the agent got involved.
+                </p>
+                <IncidentsSection incidents={incidents} apiUrl={publicApiUrl} />
+              </section>
+            )}
           </div>
-          <p className="text-xs text-muted-foreground mb-3">
-            Every detected incident, whether Kubernetes' own self-healing closed it out or the agent got involved.
-          </p>
-          <IncidentsSection incidents={incidents} apiUrl={publicApiUrl} />
-        </section>
+        )}
+
       </div>
     </main>
   );

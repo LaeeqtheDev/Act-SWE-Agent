@@ -14,6 +14,7 @@ interface PendingPayment {
   note: string | null;
   status: string;
   createdAt: string;
+  reviewedAt: string | null;
 }
 
 interface AdminUser {
@@ -52,7 +53,8 @@ export default function AdminPage() {
     try {
       const res = await fetch(`${API_URL}/billing/pending`, { headers: headers() });
       if (!res.ok) throw new Error((await res.json()).error || "Failed to load.");
-      setPending(await res.json());
+      const data = await res.json();
+      setPending(Array.isArray(data) ? data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load.");
     } finally {
@@ -67,7 +69,8 @@ export default function AdminPage() {
     try {
       const res = await fetch(`${API_URL}/admin/users`, { headers: headers() });
       if (!res.ok) throw new Error((await res.json()).error || "Failed to load.");
-      setUsers(await res.json());
+      const data = await res.json();
+      setUsers(Array.isArray(data) ? data : []);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load.");
     } finally {
@@ -188,6 +191,10 @@ export default function AdminPage() {
                   <p className="text-sm text-foreground truncate">{p.fileName}</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
                     user {p.userId.slice(0, 12)}... {p.amount && `· ${p.amount}`} {p.note && `· ${p.note}`}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground/60 mt-1">
+                    Submitted {new Date(p.createdAt).toLocaleString()}
+                    {p.reviewedAt && ` · Reviewed ${new Date(p.reviewedAt).toLocaleString()}`}
                   </p>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">

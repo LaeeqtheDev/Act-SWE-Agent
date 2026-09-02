@@ -33,7 +33,10 @@ export function AgentActivity({ apiUrl }: { apiUrl: string }) {
 
   async function load() {
     const res = await fetch(`${apiUrl}/actions`, { cache: "no-store" });
-    setActions(await res.json());
+    // The endpoint returns an array on success but {error} on 401/500 —
+    // setting that object directly is what crashes .filter/.map downstream.
+    const data = await res.json();
+    setActions(Array.isArray(data) ? data : []);
     setLoading(false);
   }
 

@@ -42,7 +42,8 @@ export function IncidentsSection({ incidents, apiUrl }: { incidents: Incident[];
     setSelected(incident);
     setInvestigation(null);
     const res = await fetch(`${apiUrl}/incidents/${incident.id}/events`);
-    setEvents(await res.json());
+    const data = await res.json();
+    setEvents(Array.isArray(data) ? data : []);
   }
 
   async function resolveIncident() {

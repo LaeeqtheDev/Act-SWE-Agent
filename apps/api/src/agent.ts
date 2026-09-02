@@ -3,10 +3,12 @@ import { getProvider } from "./providers/index.js";
 import type { AgentMessage } from "./providers/index.js";
 import { getTools, runTool, compactHistoryForRequest } from "./tools/index.js";
 import { restartDeployment } from "./k8s.js";
-import { performBrowserAction, type BrowserActionPayload } from "./tools/browser.js";
+import { performBrowserAction, performFormFill, type BrowserActionPayload, type FormFillPayload } from "./tools/browser.js";
 import { performFileEdit, performShellCommand, type FileEditPayload, type ShellCommandPayload } from "./tools/devtools.js";
 import { checkAndIncrementUsage, UsageLimitError } from "./usage.js";
-import { appendFollowUp } from "./chat.js";
+import { resumeAfterAction } from "./chat.js";
+import { detectToolFailure, reportAgentIncident } from "./agent-incidents.js";
+import { agentActionsTotal, toolCallsTotal } from "./metrics.js";
 
 const prisma = new PrismaClient();
 
@@ -88,7 +90,8 @@ Use your tools to gather more evidence before concluding.`,
   let finalText = "";
 
   try {
-    for (let turn = 0; turn < 4; turn++) {
+    const maxTurns = Number(process.env.AGENT_MAX_TURNS) || 8;
+    for (let turn = 0; turn < maxTurns; turn++) {
       const result = await provider.runTurn({ system: SYSTEM_PROMPT, tools: getTools(), history: compactHistoryForRequest(history) });
 
       if (result.toolCalls.length === 0) {
@@ -99,14 +102,18 @@ Use your tools to gather more evidence before concluding.`,
       history.push({ role: "assistant", content: result.text ?? "", toolCalls: result.toolCalls });
 
       for (const call of result.toolCalls) {
-        const output = await runTool(call.name, call.input, { incidentId });
+        const output = await runTool(call.name, call.input, { incidentId, userId });
+        detectToolFailure(call.name, output).catch(() => {});
+        toolCallsTotal.inc({ tool: call.name, outcome: output && typeof output === "object" && "error" in output ? "error" : "success" });
         history.push({ role: "tool", toolCallId: call.id, toolName: call.name, content: JSON.stringify(output) });
       }
     }
   } catch (err) {
     console.error("[agent] investigation loop failed:", err);
+    const message = err instanceof Error ? err.message : "unknown error";
+    reportAgentIncident(provider.name, message).catch(() => {});
     return {
-      summary: `The investigation failed partway through: ${err instanceof Error ? err.message : "unknown error"}`,
+      summary: `The investigation failed partway through: ${message}`,
       probableCause: "unknown — agent error",
       confidence: 0,
       evidence: [],
@@ -144,14 +151,16 @@ export async function performAction(actionId: string) {
   if (action.status !== "approved") throw new Error("action is not approved");
 
   // Every branch below funnels through this at the end — it's what makes an
-  // approval feel finished instead of leaving the chat hanging. If the
-  // action came from a conversation, that conversation gets a real message
-  // saying what happened, so coming back to it later (or asking a follow-up
-  // right away) has actual context instead of silence.
+  // approval actually finish the task instead of leaving the chat waiting
+  // for the user to say "continue." If the action came from a conversation,
+  // resumeAfterAction runs a REAL next turn there — the agent can propose
+  // the next step (still gated behind its own approval) or wrap up, on its
+  // own, right after the action completes.
   async function finish<T>(result: T, summary: string) {
     await prisma.agentAction.update({ where: { id: actionId }, data: { status: "completed", resolvedAt: new Date() } });
+    agentActionsTotal.inc({ type: action!.type, status: "completed" });
     if (action!.conversationId) {
-      await appendFollowUp(action!.conversationId, summary);
+      resumeAfterAction(action!.conversationId, summary).catch((err) => console.error("[agent] resumeAfterAction failed:", err));
     }
     return result;
   }
@@ -159,12 +168,24 @@ export async function performAction(actionId: string) {
   if (action.type === "browser_action") {
     const evidence = action.evidence as { payload?: BrowserActionPayload } | null;
     if (!evidence?.payload) throw new Error("no browser action payload stored on this action");
-    const result = await performBrowserAction(evidence.payload);
+    const result = await performBrowserAction(evidence.payload, action.conversationId ?? undefined);
     return finish(
       result,
       result.success
-        ? `Done — ${result.note ?? "the browser action completed"}.`
+        ? `Done — ${result.note ?? "the browser action completed"}. Use browseWeb to read the page again — a click usually changes what's there — then continue from what you find.`
         : `That didn't work: ${result.error ?? "unknown error"}.`
+    );
+  }
+
+  if (action.type === "form_fill") {
+    const evidence = action.evidence as { payload?: FormFillPayload } | null;
+    if (!evidence?.payload) throw new Error("no form payload stored on this action");
+    const result = await performFormFill(evidence.payload, action.conversationId ?? undefined);
+    return finish(
+      result,
+      result.success
+        ? `Filled ${result.filled} field${result.filled === 1 ? "" : "s"}${result.submitted ? " and submitted the form" : ""}. Use browseWeb to read the page and confirm what happened, then continue.`
+        : `The form fill failed: ${result.error ?? "unknown error"}.`
     );
   }
 

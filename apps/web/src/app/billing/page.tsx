@@ -2,8 +2,9 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowLeft, CreditCard, Upload, Loader2, Check, Landmark, ExternalLink } from "lucide-react";
+import { CreditCard, Upload, Loader2, Check, Landmark, ExternalLink, XCircle } from "lucide-react";
 import { ClerkTokenBridge } from "@/components/auth/clerk-token-bridge";
+import { AppNav } from "@/components/app-nav";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
@@ -16,16 +17,26 @@ interface BankDetails {
   note?: string | null;
 }
 
+interface Usage {
+  hosted: boolean;
+  plan?: string;
+  tasksUsed?: number;
+  limit?: number;
+}
+
 // Only meaningful in hosted mode — self-hosted deployments have no concept
 // of plans, so there's nothing to upgrade.
 export default function BillingPage() {
   const [getToken, setGetToken] = useState<(() => Promise<string | null>) | undefined>(undefined);
   const [checkingOut, setCheckingOut] = useState(false);
   const [openingPortal, setOpeningPortal] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelled, setCancelled] = useState<Date | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploaded, setUploaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bank, setBank] = useState<BankDetails | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
 
   useEffect(() => {
     fetch(`${API_URL}/billing/bank-details`)
@@ -35,9 +46,33 @@ export default function BillingPage() {
   }, []);
 
   async function authHeaders(): Promise<Record<string, string>> {
-    if (!getToken) return {};
+    if (typeof getToken !== "function") return {};
     const token = await getToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  useEffect(() => {
+    (async () => {
+      const res = await fetch(`${API_URL}/usage`, { headers: await authHeaders() });
+      if (res.ok) setUsage(await res.json());
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [getToken]);
+
+  async function cancelPlan() {
+    if (!confirm("Downgrade to Free? You'll keep Pro access until the current billing period ends.")) return;
+    setCancelling(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/billing/cancel`, { method: "POST", headers: await authHeaders() });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Cancellation failed.");
+      setCancelled(data.cancelsAt ? new Date(data.cancelsAt) : null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong.");
+    } finally {
+      setCancelling(false);
+    }
   }
 
   async function startCheckout() {
@@ -100,17 +135,54 @@ export default function BillingPage() {
 
   return (
     <div className="min-h-screen bg-background">
-      <ClerkTokenBridge onReady={setGetToken} />
+      <ClerkTokenBridge onReady={(fn) => setGetToken(() => fn)} />
+      <AppNav getToken={getToken} />
 
       <div className="max-w-2xl mx-auto px-6 py-12">
-        <Link href="/agent" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-8">
-          <ArrowLeft className="h-3 w-3" /> Back to chat
-        </Link>
 
         <h1 className="text-2xl font-semibold text-foreground mb-2">Billing</h1>
         <p className="text-sm text-muted-foreground mb-6">
           500 tasks/month and access to premium models on Pro. $30/month, cancel anytime.
         </p>
+
+        {usage?.hosted && usage.plan !== "pro" && (
+          <div className="p-4 rounded-lg border border-border mb-6 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-sm text-foreground font-medium">You&apos;re on the Free plan</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {usage.tasksUsed}/{usage.limit} tasks used this period. Upgrade below for 500/month
+                and premium models.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {usage?.plan === "pro" && (
+          <div className="p-4 rounded-lg border border-border mb-6 flex items-center justify-between">
+            <div>
+              <p className="text-sm text-foreground font-medium">You're on Pro</p>
+              {cancelled ? (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Downgrading to Free {cancelled ? `on ${cancelled.toLocaleDateString()}` : "at period end"} — you keep Pro until then.
+                </p>
+              ) : (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {usage.tasksUsed}/{usage.limit} tasks used this period
+                </p>
+              )}
+            </div>
+            {!cancelled && (
+              <button
+                onClick={cancelPlan}
+                disabled={cancelling}
+                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors"
+              >
+                {cancelling ? <Loader2 className="h-3 w-3 animate-spin" /> : <XCircle className="h-3 w-3" />}
+                Downgrade to Free
+              </button>
+            )}
+          </div>
+        )}
 
         <button
           onClick={openPortal}
@@ -118,7 +190,7 @@ export default function BillingPage() {
           className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground underline mb-10"
         >
           {openingPortal ? <Loader2 className="h-3 w-3 animate-spin" /> : <ExternalLink className="h-3 w-3" />}
-          Already subscribed? Manage or cancel your subscription
+          Update payment method or view invoices
         </button>
 
         {error && <p className="text-sm text-destructive mb-6">{error}</p>}
@@ -149,8 +221,8 @@ export default function BillingPage() {
                 <div className="flex items-center gap-1.5 text-muted-foreground mb-1.5">
                   <Landmark className="h-3 w-3" /> Transfer to:
                 </div>
-                <p className="text-foreground font-medium">{bank.bankName}</p>
-                <p className="text-foreground">{bank.accountTitle}</p>
+                {bank.bankName && <p className="text-foreground font-medium">{bank.bankName}</p>}
+                {bank.accountTitle && <p className="text-foreground">{bank.accountTitle}</p>}
                 {bank.accountNumber && (
                   <p className="text-muted-foreground font-mono">Account: {bank.accountNumber}</p>
                 )}

@@ -3,14 +3,19 @@
 import { useEffect, useRef } from "react";
 import { gsap } from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import type { LucideIcon } from "lucide-react";
+import { Zap, Layers, Search, ShieldCheck, CircleCheck } from "lucide-react";
 
 if (typeof window !== "undefined") {
   gsap.registerPlugin(ScrollTrigger);
 }
 
+// Icons are resolved by name inside this client component rather than
+// passed in from the server component — React can't serialize a component
+// function across that boundary.
+const ICONS = { zap: Zap, layers: Layers, search: Search, shield: ShieldCheck, check: CircleCheck };
+
 interface Step {
-  icon: LucideIcon;
+  icon: keyof typeof ICONS;
   title: string;
   body: string;
 }
@@ -98,7 +103,9 @@ export function PipelineScroll({ steps }: { steps: Step[] }) {
         </h2>
       </div>
       <div ref={trackRef} className="flex gap-6 px-6 md:px-8 pb-24" style={{ width: "max-content" }}>
-        {steps.map((step, i) => (
+        {steps.map((step, i) => {
+          const Icon = ICONS[step.icon];
+          return (
           <div
             key={step.title}
             ref={(el) => {
@@ -109,11 +116,12 @@ export function PipelineScroll({ steps }: { steps: Step[] }) {
             <span style={{ fontFamily: "var(--font-mono)" }} className="text-xs text-muted-foreground/50">
               0{i + 1}
             </span>
-            <step.icon className="h-6 w-6 text-foreground mt-4 mb-5" />
+            <Icon className="h-6 w-6 text-foreground mt-4 mb-5" />
             <h3 className="text-foreground text-lg font-medium mb-3">{step.title}</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">{step.body}</p>
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

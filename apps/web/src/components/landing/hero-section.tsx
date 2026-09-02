@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, GitFork } from "lucide-react";
+import { ArrowRight, GitFork, ShieldCheck, KeyRound } from "lucide-react";
 import { FlowField } from "./flow-field";
 import { SignalLine } from "./signal-line";
 import { Reveal } from "./reveal";
@@ -20,16 +20,15 @@ export function HeroSection() {
               Open source · bring your own model
             </p>
             <h1 style={{ fontFamily: "var(--font-mono)" }} className="text-4xl md:text-[3.4rem] leading-[1.05] font-medium text-foreground">
-              Talk to your
+              It doesn&apos;t explain.
               <br />
-              infrastructure.
+              It does the work.
             </h1>
             <p className="mt-6 text-base md:text-lg text-muted-foreground max-w-lg leading-relaxed">
-              A chat-first AI SRE agent, not another dashboard. Ask it how a service is
-              doing, have it investigate an incident, or tell it to check a status page —
-              it calls real tools, browses the real web, and asks before it changes anything.
-              Point it at Anthropic, OpenAI, Grok, Groq, or a local Ollama model — your key,
-              your choice.
+              An AI agent that opens a real browser, signed into your real accounts. Ask it to
+              find a job and apply — it reads the listings, fills the form with your details, and
+              shows you everything before a single thing is submitted. Any model, your key,
+              free to self-host forever.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <Link href="/agent" className="inline-flex items-center gap-2 px-5 py-3 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity">
@@ -38,6 +37,21 @@ export function HeroSection() {
               <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-5 py-3 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
                 <GitFork className="h-4 w-4" /> Fork it
               </a>
+            </div>
+
+            {/* Answers the three objections someone has before clicking:
+                does it cost anything, do I hand over credentials, can it do
+                something I didn't sanction. */}
+            <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5">
+                <ShieldCheck className="h-3.5 w-3.5 text-warn" /> Approves before it acts
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <KeyRound className="h-3.5 w-3.5 text-warn" /> No passwords handed over
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <GitFork className="h-3.5 w-3.5 text-warn" /> MIT — self-host free
+              </span>
             </div>
           </div>
 

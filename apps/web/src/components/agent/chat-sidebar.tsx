@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, MessageSquare, Trash2, Settings } from "lucide-react";
+import { Plus, MessageSquare, Trash2 } from "lucide-react";
 
 export interface ConversationSummary {
   id: string;
@@ -15,7 +15,6 @@ export function ChatSidebar({
   onSelect,
   onNew,
   onDelete,
-  onOpenSettings,
   onClearEmpty,
 }: {
   conversations: ConversationSummary[];
@@ -23,13 +22,12 @@ export function ChatSidebar({
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
-  onOpenSettings: () => void;
   onClearEmpty?: () => void;
 }) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   return (
-    <aside className="w-64 shrink-0 border-r flex flex-col h-full">
+    <aside className="w-64 shrink-0 border-r border-border flex flex-col h-full">
       <div className="p-3">
         <button
           onClick={onNew}
@@ -40,7 +38,7 @@ export function ChatSidebar({
       </div>
 
       <div className="flex-1 overflow-y-auto px-2 space-y-0.5">
-        {conversations.map((c) => (
+        {(Array.isArray(conversations) ? conversations : []).map((c) => (
           <div
             key={c.id}
             onMouseEnter={() => setHoveredId(c.id)}
@@ -67,22 +65,18 @@ export function ChatSidebar({
         ))}
       </div>
 
-      <div className="p-3 border-t space-y-1">
-        {onClearEmpty && conversations.some((c) => !c.title) && (
+      {/* Only renders when there's actually something to clear — otherwise
+          this was an empty bordered strip at the bottom of the sidebar. */}
+      {onClearEmpty && Array.isArray(conversations) && conversations.some((c) => !c.title) && (
+        <div className="p-3 border-t border-border">
           <button
             onClick={onClearEmpty}
             className="w-full flex items-center gap-2 text-xs px-3 py-1.5 rounded-md hover:bg-muted/50 transition-colors text-muted-foreground"
           >
             <Trash2 className="h-3 w-3" /> Clear empty chats
           </button>
-        )}
-        <button
-          onClick={onOpenSettings}
-          className="w-full flex items-center gap-2 text-sm px-3 py-2 rounded-md hover:bg-muted/50 transition-colors text-muted-foreground"
-        >
-          <Settings className="h-3.5 w-3.5" /> Model & API key
-        </button>
-      </div>
+        </div>
+      )}
     </aside>
   );
 }

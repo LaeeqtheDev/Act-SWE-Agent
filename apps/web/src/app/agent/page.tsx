@@ -4,15 +4,17 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Send, Loader2, Wrench, Bot, User, Settings } from "lucide-react";
+import { ArrowLeft, Send, Loader2, Wrench, Bot, User, Settings, Workflow, LayoutDashboard, Square } from "lucide-react";
 import { ChatSidebar, type ConversationSummary } from "@/components/agent/chat-sidebar";
 import { SettingsPanel } from "@/components/agent/settings-panel";
 import { ClerkTokenBridge } from "@/components/auth/clerk-token-bridge";
 import { UsageBanner } from "@/components/agent/usage-banner";
+import { AppNav } from "@/components/app-nav";
+import { NotificationBell } from "@/components/agent/notification-bell";
 import { ProposedActionCard } from "@/components/agent/proposed-action-card";
+import { isHostedMode } from "@/lib/hosted-mode";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
-const isHostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
 
 interface ToolTraceEntry {
   name: string;
@@ -33,11 +35,15 @@ interface StoredMessage {
   toolName?: string | null;
 }
 
+// Real capabilities that work regardless of whether the seeded demo
+// services exist. The old list referenced payments-api / orders-api, which
+// are removed the moment someone runs `pnpm clear-demo` — leaving
+// suggestions that fail on click.
 const SUGGESTIONS = [
-  "How are all the services looking right now?",
-  "What happened in the last incident on orders-api?",
-  "Search the web for the best way to fix a Postgres connection pool exhaustion issue",
-  "Is payments-api healthy? If not, propose restarting it.",
+  "Search the web for the top 3 AI coding tools right now and summarize the differences",
+  "Open news.ycombinator.com and tell me what's on the front page",
+  "Find remote TypeScript jobs posted this week",
+  "Check what's in my inbox that needs a reply",
 ];
 
 // A proposeAction tool result looks like { proposed, actionId, status } —
@@ -69,24 +75,32 @@ export default function AgentChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [providerLabel, setProviderLabel] = useState<string | null>(null);
   // undefined until the token bridge reports in. Self-hosted mode reports
   // undefined immediately (no auth needed); hosted mode reports Clerk's
   // real getToken function once available.
   const [getToken, setGetToken] = useState<(() => Promise<string | null>) | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
-    if (!getToken) return {};
+    if (typeof getToken !== "function") return {};
     const token = await getToken();
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, [getToken]);
 
   const loadConversations = useCallback(async () => {
+    if (isHostedMode() && typeof getToken !== "function") return;
     try {
       const res = await fetch(`${API_URL}/chat/conversations`, { headers: await authHeaders() });
-      setConversations(await res.json());
+      const data = await res.json();
+      // The endpoint returns an array on success but an object ({error: ...})
+      // on 401/500 — setting that object as state directly is what crashed
+      // the sidebar with "conversations.map is not a function".
+      setConversations(Array.isArray(data) ? data : []);
     } catch {
       // API not reachable — leave the sidebar empty rather than crash the page.
+      setConversations([]);
     }
   }, [authHeaders]);
 
@@ -94,7 +108,17 @@ export default function AgentChatPage() {
     loadConversations();
   }, [loadConversations]);
 
+  // Show which model is actually answering, right in the composer — it was
+  // previously only visible by opening the settings dialog.
   useEffect(() => {
+    fetch(`${API_URL}/ai/status`)
+      .then((r) => r.json())
+      .then((d) => setProviderLabel(d.configured ? `${d.provider}/${d.model}` : null))
+      .catch(() => {});
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    if (turns.length === 0) return; // same fix as the landing demo widget — don't scroll on initial mount
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, sending]);
 
@@ -135,8 +159,20 @@ export default function AgentChatPage() {
     await loadConversations();
   }
 
+  function cancel() {
+    // Pass an explicit reason — abort() with none surfaces as an
+    // "signal is aborted without reason" AbortError in Next's dev overlay,
+    // which looks like a crash when it's a deliberate user action.
+    abortRef.current?.abort(new DOMException("Cancelled by user", "AbortError"));
+    abortRef.current = null;
+    setSending(false);
+    setTurns((prev) => [...prev, { role: "assistant", content: "Stopped." }]);
+  }
+
   async function send(text: string) {
     if (!text.trim() || sending) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
     setTurns((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setSending(true);
@@ -155,6 +191,7 @@ export default function AgentChatPage() {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({ message: text }),
+        signal: controller.signal,
       });
       const data = await res.json();
       const replyText =
@@ -166,18 +203,23 @@ export default function AgentChatPage() {
       setTurns((prev) => [...prev, { role: "assistant", content: replyText, toolTrace: data.toolTrace, provider: data.provider }]);
       loadConversations();
     } catch (err) {
+      // A cancel is a deliberate user action, not an error to report.
+      // DOMException doesn't extend Error in every runtime, so check the
+      // name directly rather than relying on instanceof.
+      if ((err as { name?: string })?.name === "AbortError") return;
       setTurns((prev) => [
         ...prev,
         { role: "assistant", content: `Couldn't reach the API at ${API_URL} (${err instanceof Error ? err.message : "unknown error"}).` },
       ]);
     } finally {
+      abortRef.current = null;
       setSending(false);
     }
   }
 
   return (
     <div className="h-screen bg-background flex">
-      <ClerkTokenBridge onReady={setGetToken} />
+      <ClerkTokenBridge onReady={(fn) => setGetToken(() => fn)} />
 
       <ChatSidebar
         conversations={conversations}
@@ -185,33 +227,25 @@ export default function AgentChatPage() {
         onSelect={selectConversation}
         onNew={startNewChat}
         onDelete={deleteConversation}
-        onOpenSettings={() => setSettingsOpen(true)}
         onClearEmpty={clearEmptyConversations}
       />
 
       <main className="flex-1 flex flex-col min-w-0">
-        <div className="border-b">
-          <div className="px-6 py-4 flex items-center justify-between">
-            <div>
-              <Link href="/" className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground mb-1">
-                <ArrowLeft className="h-3 w-3" /> Home
-              </Link>
-              <h1 className="text-lg font-semibold flex items-center gap-2">
-                <Bot className="h-4 w-4" /> Act SWE Agent
-              </h1>
-            </div>
-            <div className="flex items-center gap-4">
+        <AppNav
+          getToken={getToken}
+          right={
+            <>
               <UsageBanner apiUrl={API_URL} getToken={getToken} />
-              <button onClick={() => setSettingsOpen(true)} className="text-muted-foreground hover:text-foreground">
+              <button
+                onClick={() => setSettingsOpen(true)}
+                className="p-2 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
+                title="Model & API key"
+              >
                 <Settings className="h-4 w-4" />
               </button>
-              <Link href="/dashboard" className="text-xs text-muted-foreground hover:text-foreground">
-                Incidents & activity →
-              </Link>
-              {isHostedMode && <UserButton afterSignOutUrl="/" />}
-            </div>
-          </div>
-        </div>
+            </>
+          }
+        />
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
@@ -285,20 +319,66 @@ export default function AgentChatPage() {
           </div>
         </div>
 
-        <div className="border-t">
-          <div className="max-w-3xl mx-auto px-6 py-4 flex gap-2">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && send(input)}
-              placeholder="Ask the agent anything..."
-              className="flex-1 text-sm rounded-md border bg-background px-3 py-2 focus:outline-none focus:ring-1 focus:ring-ring"
-            />
-            <Button onClick={() => send(input)} disabled={sending || !input.trim()}>
-              <Send className="h-4 w-4" />
-            </Button>
+        <div>
+          <div className="max-w-3xl mx-auto px-6 py-4">
+            <div className="rounded-2xl border border-border bg-card focus-within:border-foreground/30 transition-colors">
+              <textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  // Enter sends, Shift+Enter adds a newline — standard for a
+                  // chat box, and previously impossible since this was an input.
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    send(input);
+                  }
+                }}
+                rows={1}
+                placeholder="Ask the agent anything..."
+                className="w-full bg-transparent text-sm px-4 pt-3.5 pb-2 resize-none focus:outline-none placeholder:text-muted-foreground/60 max-h-40"
+                style={{ height: "auto" }}
+                onInput={(e) => {
+                  const el = e.currentTarget;
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+                }}
+              />
+              <div className="flex items-center justify-between px-3 pb-2.5">
+                <div className="flex items-center gap-2">
+                  <span
+                    style={{ fontFamily: "var(--font-mono)" }}
+                    className="text-[10px] uppercase tracking-wide text-muted-foreground/60 px-2 py-1 rounded-md border border-border"
+                  >
+                    {providerLabel ?? "not configured"}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="hidden sm:block text-[10px] text-muted-foreground/50">
+                    Enter to send · Shift+Enter for a new line
+                  </span>
+                  {sending ? (
+                    <button
+                      onClick={cancel}
+                      title="Stop"
+                      className="h-8 w-8 flex items-center justify-center rounded-lg bg-muted text-foreground hover:bg-muted/70 transition-colors"
+                    >
+                      <Square className="h-3 w-3 fill-current" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => send(input)}
+                      disabled={!input.trim()}
+                      className="h-8 w-8 flex items-center justify-center rounded-lg bg-primary text-primary-foreground disabled:opacity-30 transition-opacity"
+                    >
+                      <Send className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
+
       </main>
 
       <SettingsPanel apiUrl={API_URL} open={settingsOpen} onOpenChange={setSettingsOpen} getToken={getToken} />

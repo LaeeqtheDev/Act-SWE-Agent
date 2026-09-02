@@ -14,8 +14,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Act · SWE Agent",
-  description: "AI-powered incident response & cloud operations platform.",
+  title: "Act · SWE Agent — an AI agent that actually does the work",
+  description:
+    "An open-source, model-agnostic AI agent that browses the real web in your own logged-in browser, fills forms, runs scheduled workflows, and asks before it changes anything. Bring your own model.",
+  icons: { icon: "/logo.svg" },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

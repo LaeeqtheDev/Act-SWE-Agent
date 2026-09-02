@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAuth } from "@clerk/nextjs";
+import { isHostedMode } from "@/lib/hosted-mode";
 
-const isHostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
 
 // Only ever mounted when isHostedMode is true — at which point
 // ClerkProviderIfHosted (layout.tsx) has definitely wrapped the app in a
@@ -12,9 +12,19 @@ const isHostedMode = process.env.NEXT_PUBLIC_HOSTED_MODE === "true";
 // useAuth() is never called without a provider present.
 function HostedTokenBridge({ onReady }: { onReady: (getToken: () => Promise<string | null>) => void }) {
   const { getToken } = useAuth();
+  // Callers pass an inline arrow for onReady, so it's a new function every
+  // render. Keeping it in a ref (instead of an effect dependency) is what
+  // stops the setState -> rerender -> new onReady -> effect -> setState
+  // loop that blew the update depth.
+  const onReadyRef = useRef(onReady);
+  onReadyRef.current = onReady;
+
   useEffect(() => {
-    onReady(getToken);
-  }, [getToken, onReady]);
+    // Wrapped in an arrow on purpose: passing `getToken` bare to a React
+    // state setter makes React treat it as a state UPDATER and store its
+    // RETURN value, which is how `getToken is not a function` happened.
+    onReadyRef.current(() => getToken());
+  }, [getToken]);
   return null;
 }
 
@@ -27,10 +37,12 @@ export function ClerkTokenBridge({
 }: {
   onReady: (getToken: (() => Promise<string | null>) | undefined) => void;
 }) {
+  const selfHostRef = useRef(onReady);
+  selfHostRef.current = onReady;
   useEffect(() => {
-    if (!isHostedMode) onReady(undefined);
-  }, [onReady]);
+    if (!isHostedMode()) selfHostRef.current(undefined);
+  }, []);
 
-  if (!isHostedMode) return null;
+  if (!isHostedMode()) return null;
   return <HostedTokenBridge onReady={onReady} />;
 }

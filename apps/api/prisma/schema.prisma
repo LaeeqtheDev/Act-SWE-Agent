@@ -33,6 +33,25 @@ model Incident {
   agentActions AgentAction[]
 }
 
+// A genuinely different concept from Incident above (which belongs to the
+// simulated payments/orders/auth/notification services — kept as a working
+// demo of the detection pipeline). This is real: whenever a tool the agent
+// actually calls during a live chat or investigation fails — a browse that
+// errors, a provider call that times out, a shell command that exits
+// non-zero — it's logged here automatically, tied to the session that hit
+// it. This is "the agent notices its own session is having a problem," not
+// a fake service.
+model AgentIncident {
+  id             String    @id @default(uuid())
+  conversationId String?
+  toolName       String
+  message        String
+  severity       String    @default("medium") // low | medium | high
+  status         String    @default("open")    // open | resolved
+  createdAt      DateTime  @default(now())
+  resolvedAt     DateTime?
+}
+
 model AgentAction {
   id             String    @id @default(uuid())
   incidentId     String?
@@ -49,6 +68,28 @@ model AgentAction {
   evidence       Json?
   createdAt      DateTime  @default(now())
   resolvedAt     DateTime?
+}
+
+// The user's own details, used to auto-fill forms the agent encounters —
+// job applications, contact forms, signups — so they don't have to retype
+// the same information every time. Stored per-user in hosted mode, under a
+// single fixed row ("default") in self-host. Deliberately a flexible JSON
+// blob rather than fixed columns: what a form needs varies wildly, and the
+// user should be able to save whatever fields matter to them.
+model UserProfile {
+  id        String   @id @default("default")
+  fullName  String?
+  email     String?
+  phone     String?
+  location  String?
+  country   String?
+  dialCode  String?
+  linkedin  String?
+  github    String?
+  website   String?
+  resume    String?  // plain-text resume/summary, used for longer form fields
+  extra     Json?    // anything else the user wants available to forms
+  updatedAt DateTime @updatedAt
 }
 
 // A single active AI provider configuration, editable from the settings UI
@@ -130,4 +171,53 @@ model Event {
   type      String
   message   String
   timestamp DateTime @default(now())
+}
+
+// A task the user wants repeated on a schedule, unattended — "check my
+// LinkedIn for messages every hour," "check payments-api health every 30
+// minutes." Runs go through the exact same agent loop as chat (same tools,
+// same permission gate on writes), just triggered by a scheduler instead of
+// a person typing. userId is null in self-host; scoped per-user in hosted
+// mode so one person's workflow never runs as someone else's account.
+model Workflow {
+  id                 String        @id @default(uuid())
+  userId             String?
+  name               String
+  prompt             String
+  cron               String        // standard 5-field cron expression
+  enabled            Boolean       @default(true)
+  notifyOnRun        Boolean       @default(true)
+  conversationId     String?       // lazily created on first run — every run of
+                                    // this workflow shares one ongoing chat, so
+                                    // the agent has real continuity across runs
+  consecutiveFailures Int          @default(0) // auto-disables after 3 in a row —
+                                                // see workflows.ts for why
+  lastRunAt          DateTime?
+  nextRunAt          DateTime?
+  createdAt          DateTime      @default(now())
+  runs               WorkflowRun[]
+}
+
+model WorkflowRun {
+  id          String    @id @default(uuid())
+  workflowId  String
+  workflow    Workflow  @relation(fields: [workflowId], references: [id])
+  status      String    @default("running") // running | completed | failed
+  result      String?
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+}
+
+// In-app notifications — a workflow finishing, an agent-detected incident
+// firing, anything that happens while nobody's watching the chat. userId is
+// null in self-host mode (a single shared inbox); scoped per-user in
+// hosted mode.
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String?
+  title     String
+  body      String
+  link      String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
 }

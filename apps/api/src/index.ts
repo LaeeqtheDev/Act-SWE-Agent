@@ -1,7 +1,6 @@
 import express from "express";
 import cors from "cors";
 import multer from "multer";
-import path from "node:path";
 import fs from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import { eventQueue } from "./queue.js";
@@ -10,9 +9,28 @@ import { getProvider, OPENAI_COMPATIBLE_PRESETS, ANTHROPIC_MODELS, isPremiumMode
 import { createConversation, listConversations, getConversationMessages, sendMessage, renameConversation, deleteConversation, deleteEmptyConversations } from "./chat.js";
 import { getProviderSettings, saveProviderSettings } from "./settings.js";
 import { getUsage } from "./usage.js";
-import { createCheckoutSession, handleStripeWebhook, submitReceipt, listPendingPayments, reviewPendingPayment, listAllPayments, getPayment, getBankDetails, createPortalSession, listUsers, setUserPlan } from "./billing.js";
+import { createCheckoutSession, handleStripeWebhook, submitReceipt, listPendingPayments, reviewPendingPayment, listAllPayments, getPayment, getBankDetails, createPortalSession, cancelSubscription, listUsers, setUserPlan } from "./billing.js";
+import { checkDemoRateLimit, runDemoChat, type DemoTurn } from "./demo.js";
+import { listAgentIncidents, resolveAgentIncident } from "./agent-incidents.js";
+import { initScheduler, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, listWorkflowRuns, runWorkflowNow } from "./workflows.js";
+import { listNotifications, unreadCount, markRead, markAllRead } from "./notifications.js";
+import { metricsMiddleware, renderMetrics, metricsContentType } from "./metrics.js";
+import { storeUploadedFile, getReceiptFile } from "./storage.js";
+import { exportTrainingDataJsonl, countEligibleConversations } from "./fine-tuning.js";
+import { getUserProfile, saveUserProfile } from "./profile.js";
 
 const app = express();
+
+// A single unhandled rejection anywhere (a fire-and-forget call missing a
+// .catch, a library throwing async) can otherwise take down the entire
+// server — which is exactly the kind of crash that looks like "the API
+// just stopped responding" from the frontend's point of view. Log it
+// loudly instead of dying silently; the actual bug still needs fixing, but
+// the server staying up to serve the next request is strictly better than
+// it going dark.
+process.on("unhandledRejection", (reason) => {
+  console.error("[fatal] unhandled promise rejection (server staying up):", reason);
+});
 const prisma = new PrismaClient();
 const PORT = 4000;
 
@@ -37,6 +55,12 @@ app.post("/billing/webhook", express.raw({ type: "application/json" }), async (r
 });
 
 app.use(express.json());
+app.use(metricsMiddleware);
+
+app.get("/metrics", async (req, res) => {
+  res.set("Content-Type", metricsContentType);
+  res.send(await renderMetrics());
+});
 
 // --- Hosted mode / auth ---
 // Self-hosted (default, HOSTED_MODE unset): no auth at all, no accounts, no
@@ -133,13 +157,8 @@ app.post("/billing/bank-transfer", receiptUpload.single("receipt"), async (req, 
   if (!userId) return res.status(401).json({ error: "Sign in required." });
   if (!req.file) return res.status(400).json({ error: "No receipt file uploaded." });
   try {
-    const payment = await submitReceipt(
-      userId,
-      req.file.path,
-      req.file.originalname,
-      req.body?.amount,
-      req.body?.note
-    );
+    const storageKey = await storeUploadedFile(req.file.path, req.file.originalname);
+    const payment = await submitReceipt(userId, storageKey, req.file.originalname, req.body?.amount, req.body?.note);
     res.json({ submitted: true, id: payment.id, status: payment.status });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "upload failed" });
@@ -189,7 +208,13 @@ app.get("/billing/receipts/:id", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const payment = await getPayment(req.params.id);
   if (!payment) return res.status(404).json({ error: "not found" });
-  res.sendFile(path.resolve(payment.receiptPath));
+  try {
+    const { buffer, contentType } = await getReceiptFile(payment.receiptPath);
+    if (contentType) res.set("Content-Type", contentType);
+    res.send(buffer);
+  } catch (err) {
+    res.status(404).json({ error: "receipt file not found on storage" });
+  }
 });
 
 // Real bank account details for wiring a transfer — configured entirely via
@@ -214,6 +239,18 @@ app.post("/billing/portal", async (req, res) => {
   }
 });
 
+app.post("/billing/cancel", async (req, res) => {
+  if (!HOSTED_MODE) return res.status(400).json({ error: "Billing only applies in hosted mode." });
+  const userId = await currentUserId(req);
+  if (!userId) return res.status(401).json({ error: "Sign in required." });
+  try {
+    const result = await cancelSubscription(userId);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "cancellation failed" });
+  }
+});
+
 // --- Admin: full user list + manual plan override ---
 // The blunt tool for "just make this account Pro" — independent of Stripe
 // or a receipt, for comps or fixing a mistake by hand.
@@ -230,6 +267,25 @@ app.post("/admin/users/:id/plan", async (req, res) => {
   res.json(await setUserPlan(req.params.id, plan));
 });
 
+// Exports your own real conversation history as fine-tuning-ready JSONL —
+// not a fine-tuning pipeline itself, see fine-tuning.ts for exactly what
+// this does and doesn't do. Admin-only since conversation content can be
+// sensitive.
+app.get("/admin/export-training-data", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const minMessages = Number(req.query.minMessages) || 4;
+  const jsonl = await exportTrainingDataJsonl(minMessages);
+  res.set("Content-Type", "application/jsonl");
+  res.set("Content-Disposition", `attachment; filename="training-data-${Date.now()}.jsonl"`);
+  res.send(jsonl);
+});
+
+app.get("/admin/export-training-data/count", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  const minMessages = Number(req.query.minMessages) || 4;
+  res.json({ eligibleConversations: await countEligibleConversations(minMessages) });
+});
+
 // --- Settings: model provider + BYOK, entered from the UI ---
 // GET returns only a masked key preview, never the real one. POST accepts a
 // plaintext key over HTTPS in the request body (same trust boundary as
@@ -238,10 +294,17 @@ app.post("/admin/users/:id/plan", async (req, res) => {
 // never used for anyone else's chats; a single shared row in self-host mode.
 
 app.get("/settings/provider", async (req, res) => {
-  const userId = await currentUserId(req);
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
   const settings = await getProviderSettings(userId);
+  // Whether the server itself already has a working provider key from env.
+  // When true, a signed-in user doesn't need to supply anything — the app
+  // just works, and their own key becomes an optional override rather than
+  // a requirement.
+  const serverProvider = await getProvider();
   res.json({
     settings,
+    serverDefault: serverProvider ? { provider: serverProvider.name, model: serverProvider.model } : null,
     catalog: {
       anthropic: { models: ANTHROPIC_MODELS },
       ...Object.fromEntries(Object.entries(OPENAI_COMPATIBLE_PRESETS).map(([k, v]) => [k, { models: v.models }])),
@@ -253,7 +316,8 @@ app.post("/settings/provider", async (req, res) => {
   const { provider, model, apiKey } = req.body ?? {};
   if (!provider || !model) return res.status(400).json({ error: "provider and model are required" });
   try {
-    const userId = await currentUserId(req);
+    const userId = await requireUserIfHosted(req, res);
+    if (HOSTED_MODE && !userId) return;
 
     // Phase 6: free hosted accounts can't select a premium model unless
     // they're providing their own key (BYOK bypasses this — they're paying
@@ -276,6 +340,152 @@ app.post("/settings/provider", async (req, res) => {
   }
 });
 
+
+// --- Landing page demo widget ---
+// No auth, rate-limited per IP, read-only tools only. See demo.ts for why.
+app.post("/demo/chat", async (req, res) => {
+  const ip = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.socket.remoteAddress || "unknown";
+  const { allowed, remaining } = checkDemoRateLimit(ip);
+  if (!allowed) {
+    return res.status(429).json({
+      error: "Demo limit reached for now — sign up for the full agent, or self-host it with your own key.",
+      remaining: 0,
+    });
+  }
+
+  const history = (req.body?.history as DemoTurn[]) ?? [];
+  if (history.length > 12) history.splice(0, history.length - 12); // keep it small regardless of what the client sends
+
+  try {
+    const result = await runDemoChat(history);
+    res.json({ ...result, remaining });
+  } catch (err) {
+    console.error("[demo] chat failed:", err);
+    res.status(500).json({ error: "The demo hit an error — try again in a moment." });
+  }
+});
+
+// --- Real, live agent self-monitoring ---
+// Separate from the simulated /incidents (payments-api, orders-api, etc.,
+// kept as a demo of the detection pipeline) — these are genuine failures
+// the agent hit while actually doing something, during a real chat or
+// investigation session.
+app.get("/agent-incidents", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json(await listAgentIncidents(req.query.status as string | undefined));
+});
+
+app.post("/agent-incidents/:id/resolve", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json(await resolveAgentIncident(req.params.id));
+});
+
+// --- Workflows: tasks that repeat on a schedule, unattended ---
+// Same tools, same permission gate on writes as a real chat — a schedule
+// triggers it instead of a person typing. In hosted mode these require a
+// signed-in user and are scoped to them; self-host has one shared list.
+
+app.get("/workflows", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json(await listWorkflows(userId));
+});
+
+app.post("/workflows", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  const { name, prompt, cron, notifyOnRun } = req.body ?? {};
+  if (!name || !prompt || !cron) return res.status(400).json({ error: "name, prompt, and cron are required" });
+  try {
+    const workflow = await createWorkflow({ name, prompt, cron, notifyOnRun, userId });
+    res.json(workflow);
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : "failed to create workflow" });
+  }
+});
+
+app.patch("/workflows/:id", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  const { name, prompt, cron, enabled, notifyOnRun } = req.body ?? {};
+  const workflow = await updateWorkflow(req.params.id, { name, prompt, cron, enabled, notifyOnRun });
+  res.json(workflow);
+});
+
+app.delete("/workflows/:id", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  await deleteWorkflow(req.params.id);
+  res.json({ deleted: true });
+});
+
+app.post("/workflows/:id/run", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  runWorkflowNow(req.params.id).catch((err) => console.error("[workflows] manual run failed:", err));
+  res.json({ started: true });
+});
+
+app.get("/workflows/:id/runs", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json(await listWorkflowRuns(req.params.id));
+});
+
+// --- Notifications ---
+
+app.get("/notifications", async (req, res) => {
+  const userId = await currentUserId(req);
+  res.json({ notifications: await listNotifications(userId), unread: await unreadCount(userId) });
+});
+
+app.post("/notifications/:id/read", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json(await markRead(req.params.id));
+});
+
+app.post("/notifications/read-all", async (req, res) => {
+  const userId = await currentUserId(req);
+  await markAllRead(userId);
+  res.json({ ok: true });
+});
+
+// --- User profile: saved details used to auto-fill forms ---
+// Job applications, contact forms, signups — the agent reads this via the
+// getUserProfile tool so the user never retypes the same information.
+
+app.get("/profile", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  res.json((await getUserProfile(userId)) ?? {});
+});
+
+app.post("/profile", async (req, res) => {
+  const userId = await requireUserIfHosted(req, res);
+  if (HOSTED_MODE && !userId) return;
+  const saved = await saveUserProfile(req.body ?? {}, userId);
+  res.json({ saved: true, profile: saved });
+});
+
+// Reports which optional subsystems are actually active. Useful for
+// answering "I set HOSTED_MODE=true, why is there still no login?" — if
+// this says hosted is false, the API never picked up the env change
+// (usually: the server wasn't restarted).
+app.get("/config", (req, res) => {
+  res.json({
+    hostedMode: HOSTED_MODE,
+    clerkConfigured: !!process.env.CLERK_SECRET_KEY && !!process.env.CLERK_PUBLISHABLE_KEY,
+    stripeConfigured: !!process.env.STRIPE_SECRET_KEY,
+    bankTransferConfigured: !!getBankDetails(),
+    smtpConfigured: !!process.env.SMTP_HOST,
+    browserVisible: process.env.BROWSER_HEADLESS === "false",
+    localDevTools: process.env.ENABLE_LOCAL_DEV_TOOLS === "true",
+    chromeProfile: !!process.env.CHROME_USER_DATA_DIR,
+  });
+});
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
@@ -481,6 +691,7 @@ app.post("/actions/:id/approve", async (req, res) => {
     const result = await performAction(req.params.id);
     res.json({ approved: true, result });
   } catch (err) {
+    console.error("[actions] approve failed:", err);
     res.status(400).json({ error: err instanceof Error ? err.message : "approval failed" });
   }
 });
@@ -566,6 +777,30 @@ app.delete("/chat/conversations", async (req, res) => {
   res.json(result);
 });
 
+// Global error handler — must be registered LAST, after every route. Any
+// error thrown or rejected inside an async route handler ends up here —
+// Express 5 forwards async errors to error middleware natively, no patch
+// package needed (unlike Express 4). This is what turns "the request never
+// got a response" (which shows up as "Failed to fetch" in the browser) into
+// a real, visible 500 with an actual message — e.g. a schema drift like
+// `prisma.workflow` not existing yet because a migration hasn't been run.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error(`[error] ${req.method} ${req.path}:`, err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: err.message || "Internal server error" });
+});
+
 app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
+
+  // Print the settings that people most often expect to be on but aren't,
+  // because .env is copied once and then drifts from .env.example.
+  const visible = process.env.BROWSER_HEADLESS === "false";
+  const profile = !!process.env.CHROME_USER_DATA_DIR;
+  console.log(
+    `[browser] visible window: ${visible ? "ON" : "OFF (set BROWSER_HEADLESS=\"false\" to watch it work)"} | ` +
+      `your Chrome profile: ${profile ? "ON" : "OFF (set CHROME_USER_DATA_DIR for logged-in sites + fewer CAPTCHAs)"}`
+  );
+  initScheduler().catch((err) => console.error("[workflows] scheduler init failed:", err));
 });

@@ -18,8 +18,29 @@ function limitFor(plan: string) {
 
 async function getOrCreateUser(userId: string, email?: string) {
   const existing = await prisma.user.findUnique({ where: { id: userId } });
-  if (existing) return existing;
-  return prisma.user.create({ data: { id: userId, email } });
+  if (existing) {
+    // Backfill email once if we didn't have it yet — needed so email
+    // notifications (mailer.ts) have somewhere to send. Only ever a single
+    // Clerk lookup per user, cached in the DB after that, not a per-request cost.
+    if (!existing.email && process.env.HOSTED_MODE === "true") {
+      const fetched = await fetchClerkEmail(userId);
+      if (fetched) return prisma.user.update({ where: { id: userId }, data: { email: fetched } });
+    }
+    return existing;
+  }
+  const email0 = email ?? (process.env.HOSTED_MODE === "true" ? await fetchClerkEmail(userId) : undefined);
+  return prisma.user.create({ data: { id: userId, email: email0 } });
+}
+
+async function fetchClerkEmail(userId: string): Promise<string | undefined> {
+  try {
+    const { clerkClient } = await import("@clerk/express");
+    const user = await clerkClient.users.getUser(userId);
+    return user.emailAddresses[0]?.emailAddress;
+  } catch (err) {
+    console.error("[usage] failed to fetch email from Clerk:", err);
+    return undefined;
+  }
 }
 
 // A "task" is one chat turn or one incident investigation. Call this BEFORE

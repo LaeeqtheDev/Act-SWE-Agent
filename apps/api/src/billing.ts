@@ -128,12 +128,21 @@ export async function getPayment(id: string) {
 export function getBankDetails() {
   const bankName = process.env.BANK_NAME;
   const accountTitle = process.env.BANK_ACCOUNT_TITLE;
-  if (!bankName || !accountTitle) return null; // not configured — bank transfer UI hides itself
+  const accountNumber = process.env.BANK_ACCOUNT_NUMBER;
+  const iban = process.env.BANK_IBAN;
+
+  // Show the section if ANY usable detail is configured — previously this
+  // required BOTH bankName AND accountTitle and silently returned null
+  // otherwise, so setting just the account number and IBAN (which is what
+  // someone actually needs to send a transfer) showed nothing at all.
+  if (!bankName && !accountTitle && !accountNumber && !iban) return null;
+
   return {
-    bankName,
-    accountTitle,
-    accountNumber: process.env.BANK_ACCOUNT_NUMBER || null,
-    iban: process.env.BANK_IBAN || null,
+    configured: true,
+    bankName: bankName || null,
+    accountTitle: accountTitle || null,
+    accountNumber: accountNumber || null,
+    iban: iban || null,
     note: process.env.BANK_TRANSFER_NOTE || null,
   };
 }
@@ -155,6 +164,28 @@ export async function createPortalSession(userId: string, returnUrl: string) {
     return_url: returnUrl,
   });
   return { url: session.url };
+}
+
+// A direct "Downgrade to Free" button, not just a redirect to Stripe's
+// portal — cancels the subscription right away (at period end, so a user
+// who already paid for this month keeps Pro access until it runs out,
+// standard SaaS behavior) without leaving the app. The portal above still
+// exists for updating a card or viewing invoices; this is the one-click
+// path for the single most common thing someone wants to do.
+export async function cancelSubscription(userId: string): Promise<{ cancelsAt: Date | null }> {
+  const stripe = getStripe();
+  if (!stripe) throw new Error("Stripe isn't configured yet — set STRIPE_SECRET_KEY.");
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user?.stripeSubscriptionId) {
+    throw new Error("No active subscription found to cancel.");
+  }
+
+  const subscription = await stripe.subscriptions.update(user.stripeSubscriptionId, { cancel_at_period_end: true });
+  // Plan flips to "free" for real once Stripe's own webhook fires at period
+  // end (customer.subscription.deleted, already handled) — this just
+  // schedules that, it doesn't downgrade access early.
+  return { cancelsAt: subscription.cancel_at ? new Date(subscription.cancel_at * 1000) : null };
 }
 
 // --- Admin: manage any user's plan directly ---
