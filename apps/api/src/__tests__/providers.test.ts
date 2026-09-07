@@ -5,7 +5,10 @@ describe("isPremiumModel", () => {
   it("flags known premium models", () => {
     expect(isPremiumModel("claude-sonnet-4-5")).toBe(true);
     expect(isPremiumModel("gpt-4o")).toBe(true);
-    expect(isPremiumModel("openai/gpt-oss-120b")).toBe(true);
+    // Groq's whole catalog is free-tier by design — it must never be
+    // classified premium, or selecting it 403s free-plan users outright.
+    expect(isPremiumModel("openai/gpt-oss-120b")).toBe(false);
+    expect(isPremiumModel("groq/compound")).toBe(false);
   });
 
   it("does not flag economy/free-tier models", () => {

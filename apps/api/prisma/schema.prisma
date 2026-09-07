@@ -54,6 +54,10 @@ model AgentIncident {
 
 model AgentAction {
   id             String    @id @default(uuid())
+  // Who proposed this. Required for integration actions: without it, an
+  // approved Slack message would be sent using whichever connection
+  // happened to resolve — i.e. potentially someone else's workspace.
+  userId         String?
   incidentId     String?
   incident       Incident? @relation(fields: [incidentId], references: [id])
   // Set when the action was proposed from a chat conversation rather than
@@ -96,6 +100,27 @@ model UserProfile {
 // instead of only via .env. apiKeyEnc is AES-256-GCM ciphertext (base64) —
 // SETTINGS_ENCRYPTION_KEY (server-side only) is required to decrypt it, and
 // the plaintext key is never sent back to the frontend after it's saved.
+// An OAuth connection to a third-party service (Slack, Notion). Tokens are
+// encrypted with the same AES-256-GCM key as provider API keys — see
+// lib/crypto.ts. Scoped per-user in hosted mode; a single shared row when
+// self-hosting, matching how ProviderConfig works.
+model Connection {
+  id           String    @id @default(uuid())
+  userId       String?   // null in self-host mode
+  service      String    // "slack" | "notion"
+  accessToken  String    // AES-256-GCM ciphertext, never plaintext
+  refreshToken String?   // ciphertext; Notion tokens don't expire, Slack's may
+  workspaceName String?  // shown in the UI so people know WHICH workspace
+  scopes       String?
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // One connection per service per user — reconnecting replaces rather than
+  // accumulating stale tokens.
+  @@unique([userId, service])
+}
+
 model ProviderConfig {
   id        String   @id @default("active")
   provider  String
@@ -184,6 +209,12 @@ model Workflow {
   userId             String?
   name               String
   prompt             String
+  // Optional additional stages, run in order after `prompt`, each in the
+  // same conversation so later stages can see what earlier ones found.
+  // A real pipeline — "find businesses, then check their sites, then email
+  // them" — is three distinct jobs, and cramming it into one prompt means
+  // the agent runs out of steps before reaching stage three.
+  stages             Json?
   cron               String        // standard 5-field cron expression
   enabled            Boolean       @default(true)
   notifyOnRun        Boolean       @default(true)

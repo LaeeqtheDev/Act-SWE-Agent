@@ -18,7 +18,7 @@ vi.mock("@prisma/client", () => ({
 
 // Imported AFTER the mock is set up so usage.ts's `new PrismaClient()`
 // resolves to prismaMock.
-const { checkAndIncrementUsage, UsageLimitError, getUsage } = await import("../usage.js");
+const { checkAndIncrementUsage, UsageLimitError, getUsage, isPleasantry } = await import("../usage.js");
 
 function fakeUser(overrides: Partial<{ tasksUsed: number; plan: string; periodStart: Date; email: string | null }> = {}) {
   return {
@@ -46,24 +46,24 @@ describe("checkAndIncrementUsage", () => {
     const result = await checkAndIncrementUsage("user_123");
 
     expect(result.plan).toBe("free");
-    expect(result.limit).toBe(10);
+    expect(result.limit).toBe(60);
     expect(prismaMock.user.create).toHaveBeenCalledWith({ data: { id: "user_123", email: undefined } });
   });
 
   it("throws UsageLimitError exactly at the free-tier limit, not one early or late", async () => {
-    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 10 })); // already at the limit
+    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 60 })); // already at the limit
 
     await expect(checkAndIncrementUsage("user_123")).rejects.toThrow(UsageLimitError);
     // The increment must never be attempted once the limit is hit.
     expect(prismaMock.user.update).not.toHaveBeenCalledWith(expect.objectContaining({ data: { tasksUsed: { increment: 1 } } }));
   });
 
-  it("allows the task at 9/10 (one below the limit)", async () => {
-    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 9 }));
-    prismaMock.user.update.mockResolvedValue(fakeUser({ tasksUsed: 10 }));
+  it("allows the task at 59/60 (one below the limit)", async () => {
+    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 59 }));
+    prismaMock.user.update.mockResolvedValue(fakeUser({ tasksUsed: 60 }));
 
     const result = await checkAndIncrementUsage("user_123");
-    expect(result.tasksUsed).toBe(10);
+    expect(result.tasksUsed).toBe(60);
   });
 
   it("gives Pro accounts the 500 limit, not the free 10", async () => {
@@ -71,13 +71,13 @@ describe("checkAndIncrementUsage", () => {
     prismaMock.user.update.mockResolvedValue(fakeUser({ plan: "pro", tasksUsed: 51 }));
 
     const result = await checkAndIncrementUsage("user_123");
-    expect(result.limit).toBe(500);
+    expect(result.limit).toBe(2000);
     expect(result.plan).toBe("pro");
   });
 
   it("resets tasksUsed to 0 once the 30-day period has elapsed", async () => {
     const staleDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000); // 31 days ago
-    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 10, periodStart: staleDate }));
+    prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 60, periodStart: staleDate }));
     // First update call is the period reset, second is the increment.
     prismaMock.user.update
       .mockResolvedValueOnce(fakeUser({ tasksUsed: 0, periodStart: new Date() }))
@@ -99,12 +99,33 @@ describe("getUsage", () => {
   it("returns free-tier defaults for a user that doesn't exist yet", async () => {
     prismaMock.user.findUnique.mockResolvedValue(null);
     const result = await getUsage("never_seen_before");
-    expect(result).toEqual({ tasksUsed: 0, limit: 10, plan: "free" });
+    expect(result).toEqual({ tasksUsed: 0, limit: 60, plan: "free" });
   });
 
   it("reflects the real stored usage for an existing user", async () => {
     prismaMock.user.findUnique.mockResolvedValue(fakeUser({ tasksUsed: 7, plan: "pro" }));
     const result = await getUsage("user_123");
-    expect(result).toEqual({ tasksUsed: 7, limit: 500, plan: "pro" });
+    expect(result).toEqual({ tasksUsed: 7, limit: 2000, plan: "pro" });
+  });
+});
+
+describe("isPleasantry", () => {
+  it("treats short acknowledgements as free", () => {
+    for (const t of ["thanks", "thank you", "it worked", "cool", "ok", "perfect", "Thanks!", "that worked "]) {
+      expect(isPleasantry(t), `"${t}" should be a pleasantry`).toBe(true);
+    }
+  });
+
+  it("never misclassifies a real request as a pleasantry", () => {
+    for (const t of [
+      "ok now find me a job at stripe",
+      "thanks, can you also search for TypeScript roles",
+      "yes play the next song",
+      "no, use the other one instead",
+      "done?",
+      "great, now open youtube and play it",
+    ]) {
+      expect(isPleasantry(t), `"${t}" should NOT be a pleasantry`).toBe(false);
+    }
   });
 });

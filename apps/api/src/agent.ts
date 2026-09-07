@@ -9,6 +9,7 @@ import { checkAndIncrementUsage, UsageLimitError } from "./usage.js";
 import { resumeAfterAction } from "./chat.js";
 import { detectToolFailure, reportAgentIncident } from "./agent-incidents.js";
 import { agentActionsTotal, toolCallsTotal } from "./metrics.js";
+import { postSlackMessage, appendToNotionPage } from "./tools/integrations.js";
 
 const prisma = new PrismaClient();
 
@@ -187,6 +188,23 @@ export async function performAction(actionId: string) {
         ? `Filled ${result.filled} field${result.filled === 1 ? "" : "s"}${result.submitted ? " and submitted the form" : ""}. Use browseWeb to read the page and confirm what happened, then continue.`
         : `The form fill failed: ${result.error ?? "unknown error"}.`
     );
+  }
+
+  if (action.type === "slack_message") {
+    const evidence = action.evidence as { payload?: { channel: string; text: string } } | null;
+    if (!evidence?.payload) throw new Error("no Slack payload stored on this action");
+    const result = await postSlackMessage(evidence.payload.channel, evidence.payload.text, action.userId ?? undefined);
+    return finish(
+      result,
+      result.success ? `Posted to ${evidence.payload.channel}.` : `Couldn't post: ${result.error}`
+    );
+  }
+
+  if (action.type === "notion_append") {
+    const evidence = action.evidence as { payload?: { pageId: string; text: string } } | null;
+    if (!evidence?.payload) throw new Error("no Notion payload stored on this action");
+    const result = await appendToNotionPage(evidence.payload.pageId, evidence.payload.text, action.userId ?? undefined);
+    return finish(result, result.success ? "Added to the Notion page." : `Couldn't write to Notion: ${result.error}`);
   }
 
   if (action.type === "file_edit") {

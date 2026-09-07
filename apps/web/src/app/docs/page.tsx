@@ -1,109 +1,236 @@
-import { MarketingShell } from "@/components/marketing/marketing-shell";
-import { Terminal, GitFork, Wrench, ShieldCheck, Gift } from "lucide-react";
+import { DocsLayout, type DocSection } from "@/components/docs/docs-layout";
+import { H2, H3, P, Code, Pre, Note, Table } from "@/components/docs/doc-parts";
 
 export const metadata = { title: "Docs — Act · SWE Agent" };
 
-const CodeBlock = ({ children }: { children: string }) => (
-  <pre style={{ fontFamily: "var(--font-mono)" }} className="text-xs bg-card border border-border rounded-md p-4 overflow-x-auto text-foreground my-3">
-    {children}
-  </pre>
-);
+const sections: DocSection[] = [
+  {
+    id: "getting-started",
+    title: "Getting started",
+    items: [
+      { id: "install", title: "Install" },
+      { id: "providers", title: "Choosing a model" },
+      { id: "run", title: "Running it" },
+    ],
+  },
+  {
+    id: "browser",
+    title: "Browser control",
+    items: [
+      { id: "visible", title: "Watching it work" },
+      { id: "your-chrome", title: "Using your Chrome" },
+      { id: "captchas", title: "CAPTCHAs" },
+    ],
+  },
+  {
+    id: "capabilities",
+    title: "Capabilities",
+    items: [
+      { id: "tools", title: "Tool reference" },
+      { id: "approval", title: "The approval gate" },
+      { id: "profile", title: "Form auto-fill" },
+    ],
+  },
+  {
+    id: "workflows",
+    title: "Workflows",
+    items: [{ id: "scheduling", title: "Scheduling" }, { id: "notifications", title: "Notifications" }],
+  },
+  {
+    id: "contributing",
+    title: "Contributing",
+    items: [
+      { id: "add-provider", title: "Add a provider" },
+      { id: "add-tool", title: "Add a tool" },
+      { id: "pr", title: "Opening a PR" },
+    ],
+  },
+];
 
 export default function DocsPage() {
   return (
-    <MarketingShell>
-      <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-4">
-        Docs
-      </p>
-      <h1 style={{ fontFamily: "var(--font-mono)" }} className="text-3xl md:text-4xl font-medium text-foreground mb-8">
-        For developers
-      </h1>
+    <DocsLayout sections={sections}>
+      <div className="mb-12">
+        <h1 className="text-3xl font-semibold text-foreground mb-3">Documentation</h1>
+        <p className="text-base text-muted-foreground leading-relaxed">
+          Everything needed to run Act locally, point it at a model, and extend it. Self-hosting is the
+          default — no accounts, no limits, no billing.
+        </p>
+      </div>
 
-      <section className="mb-12">
-        <div className="flex items-center gap-2 mb-3">
-          <Terminal className="h-4 w-4 text-warn" />
-          <h2 className="text-lg font-medium text-foreground">Local setup</h2>
-        </div>
-        <CodeBlock>{`git clone https://github.com/LaeeqtheDev/Act-SWE-Agent.git
+      <H2 id="getting-started">Getting started</H2>
+
+      <H3 id="install">Install</H3>
+      <P>Node 20+, pnpm, PostgreSQL, and Redis. Docker handles the last two if you&apos;d rather not install them.</P>
+      <Pre>{`git clone https://github.com/LaeeqtheDev/Act-SWE-Agent.git
 cd Act-SWE-Agent
 pnpm install
 docker compose up postgres redis -d
-cd apps/api && pnpm exec prisma migrate dev
-cp apps/api/.env.example apps/api/.env   # add at least one AI provider key
-pnpm --filter api dev      # terminal 1
-pnpm --filter api worker   # terminal 2
-pnpm --filter web dev      # terminal 3`}</CodeBlock>
-        <p className="text-sm text-muted-foreground mt-2">
-          Full setup notes, including the local browser and dev-tools opt-ins, live in{" "}
-          <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">docs/SETUP.md</code> in the repo.
-        </p>
-      </section>
 
-      <section className="mb-12">
-        <div className="flex items-center gap-2 mb-3">
-          <Wrench className="h-4 w-4 text-warn" />
-          <h2 className="text-lg font-medium text-foreground">Adding a new AI provider</h2>
-        </div>
-        <p className="text-sm text-muted-foreground leading-relaxed mb-3">
-          Every provider implements one interface (<code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">apps/api/src/providers/types.ts</code>):
-        </p>
-        <CodeBlock>{`interface AIProvider {
-  name: string;
-  model: string;
-  runTurn(opts: {
-    system: string;
-    tools: ToolDef[];
-    history: AgentMessage[];
-  }): Promise<AgentTurn>;
-}`}</CodeBlock>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          If the provider speaks the OpenAI chat-completions + function-calling format (most do), you likely
-          don&apos;t need a new file — add a preset to <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">OPENAI_COMPATIBLE_PRESETS</code> in
-          <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs ml-1">providers/index.ts</code> with its base URL and env var name. Otherwise,
-          copy <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">providers/anthropic.ts</code> as a template.
-        </p>
-      </section>
+cp apps/api/.env.example apps/api/.env
+cd apps/api && pnpm exec prisma migrate dev && cd ../..`}</Pre>
 
-      <section className="mb-12">
-        <div className="flex items-center gap-2 mb-3">
-          <ShieldCheck className="h-4 w-4 text-warn" />
-          <h2 className="text-lg font-medium text-foreground">Adding a new agent tool</h2>
-        </div>
-        <p className="text-sm text-muted-foreground leading-relaxed mb-3">
-          Tools live in <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">apps/api/src/tools/index.ts</code>. Add a <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">ToolDef</code> entry
-          and a matching <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">case</code> in <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">runTool()</code>. The one rule
-          that matters: <strong className="text-foreground">read tools execute immediately, write tools never do.</strong> Anything
-          that changes state — restarting a pod, clicking something in a browser, editing a file, running a
-          shell command — must go through <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">proposeAction</code> instead of executing directly, so a human
-          approves it via <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">/actions/:id/approve</code> before <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">performAction()</code> in{" "}
-          <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">agent.ts</code> actually runs it.
-        </p>
-      </section>
+      <H3 id="providers">Choosing a model</H3>
+      <P>
+        Set one provider and its key in <Code>apps/api/.env</Code>, or paste a key in the app&apos;s settings
+        panel — that&apos;s stored encrypted and takes priority over the env var.
+      </P>
+      <Table
+        head={["Provider", "Env var", "Notes"]}
+        rows={[
+          [<Code key="g">groq</Code>, <Code key="gk">GROQ_API_KEY</Code>, "Free tier. Default: openai/gpt-oss-20b"],
+          [<Code key="a">anthropic</Code>, <Code key="ak">ANTHROPIC_API_KEY</Code>, "Claude models"],
+          [<Code key="o">openai</Code>, <Code key="ok">OPENAI_API_KEY</Code>, "GPT-4o and others"],
+          [<Code key="x">grok</Code>, <Code key="xk">XAI_API_KEY</Code>, "xAI"],
+          [<Code key="ol">ollama</Code>, "—", "Fully local, no key needed"],
+        ]}
+      />
+      <Note tone="warn">
+        Groq&apos;s free tier allows 8,000 tokens per minute. A long multi-step task can hit that ceiling. If
+        you see <Code>413</Code> or <Code>429</Code>, set <Code>AGENT_MAX_TURNS=&quot;4&quot;</Code> or switch to a
+        larger model — bigger models often finish in fewer steps, so they can be faster overall.
+      </Note>
 
-      <section className="mb-12">
-        <div className="flex items-center gap-2 mb-3">
-          <GitFork className="h-4 w-4 text-warn" />
-          <h2 className="text-lg font-medium text-foreground">Contributing a PR</h2>
-        </div>
-        <ol className="text-sm text-muted-foreground leading-relaxed space-y-2 list-decimal pl-5">
-          <li>Fork the repo, create a branch off <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">main</code></li>
-          <li>Keep PRs focused — one provider, one tool, or one bug fix is easier to review than a bundle of unrelated changes</li>
-          <li>Run <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">pnpm exec tsc --noEmit</code> in <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">apps/api</code> and <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">apps/web</code> before opening the PR</li>
-          <li>Open the PR against the repo on GitHub — <a href="https://github.com/LaeeqtheDev/Act-SWE-Agent" target="_blank" rel="noreferrer" className="text-warn hover:underline">LaeeqtheDev/Act-SWE-Agent</a></li>
-        </ol>
-      </section>
+      <H3 id="run">Running it</H3>
+      <Pre>{`pnpm --filter api dev       # API on :4000
+pnpm --filter api worker    # incident detection worker
+pnpm --filter web dev       # web on :3000`}</Pre>
+      <P>
+        Then open <Code>localhost:3000/agent</Code>.
+      </P>
 
-      <section className="border-t border-border pt-8">
-        <div className="flex items-center gap-2 mb-3">
-          <Gift className="h-4 w-4 text-warn" />
-          <h2 className="text-lg font-medium text-foreground">Free Pro access for contributors</h2>
-        </div>
-        <p className="text-sm text-muted-foreground leading-relaxed">
-          Merged a PR to the open-source core? Open an issue with the PR link and we&apos;ll upgrade your
-          hosted account to Pro at no cost — our way of saying thanks for making the free, self-hosted core
-          better for everyone.
-        </p>
-      </section>
-    </MarketingShell>
+      <H2 id="browser">Browser control</H2>
+
+      <H3 id="visible">Watching it work</H3>
+      <P>
+        By default the browser runs headless. Set this to see a real window, with a visible cursor that
+        moves and types:
+      </P>
+      <Pre>{`BROWSER_HEADLESS="false"`}</Pre>
+      <P>The API confirms it at startup:</P>
+      <Pre>{`[browser] launched session "abc123" — visible: YES, profile: yours`}</Pre>
+
+      <H3 id="your-chrome">Using your Chrome</H3>
+      <P>
+        Point it at your own Chrome profile and it inherits every session you&apos;re already signed into —
+        Gmail, LinkedIn, Slack — with no separate login step.
+      </P>
+      <Pre>{`CHROME_USER_DATA_DIR="C:\\\\Users\\\\you\\\\AppData\\\\Local\\\\Google\\\\Chrome\\\\User Data"`}</Pre>
+      <Table
+        head={["OS", "Profile path"]}
+        rows={[
+          ["Windows", <Code key="w">%LOCALAPPDATA%\\Google\\Chrome\\User Data</Code>],
+          ["macOS", <Code key="m">~/Library/Application Support/Google/Chrome</Code>],
+          ["Linux", <Code key="l">~/.config/google-chrome</Code>],
+        ]}
+      />
+      <Note tone="warn">
+        Close all other Chrome windows first — Chrome locks its profile directory while running. Parallel
+        tasks beyond the first use isolated copies, which start logged out.
+      </Note>
+      <P>
+        This is local automation of your own browser on your own machine — the same trust boundary as
+        clicking around yourself. It never runs in a hosted deployment, and every write still needs approval.
+      </P>
+
+      <H3 id="captchas">CAPTCHAs</H3>
+      <P>
+        The browser masks the obvious automation signals, which stops well-behaved sites over-triggering.
+        It will not defeat serious bot detection — Google Search and Cloudflare-protected sites still block.
+        Using your own Chrome profile helps most, since real history and cookies get challenged far less.
+      </P>
+
+      <H2 id="capabilities">Capabilities</H2>
+
+      <H3 id="tools">Tool reference</H3>
+      <Table
+        head={["Tool", "What it does", "Approval"]}
+        rows={[
+          [<Code key="1">browseWeb</Code>, "Open a URL, read it, list every clickable element", "No"],
+          [<Code key="2">webSearch</Code>, "Search and get structured results back", "No"],
+          [<Code key="3">clickToNavigate</Code>, "Click a button, tab, or link", "No"],
+          [<Code key="4">scrollPage</Code>, "Scroll — lazy-loaded content needs this", "No"],
+          [<Code key="5">goBack</Code>, "Return to the previous page", "No"],
+          [<Code key="6">readPageAsMarkdown</Code>, "Read a page with headings and lists intact", "No"],
+          [<Code key="7">pressKey</Code>, "Enter, Escape, Tab, arrows", "No"],
+          [<Code key="8">getUserProfile</Code>, "Your saved details, for filling forms", "No"],
+          [<Code key="9">proposeAction</Code>, "Submit, send, post, restart, edit, run", <span key="y" className="text-warn">Yes</span>],
+        ]}
+      />
+
+      <H3 id="approval">The approval gate</H3>
+      <P>
+        Reading and navigating happen freely. Anything that submits, sends, posts, or changes state stops
+        and waits for you. That split is what makes it safe to hand over a vague task and walk away — or to
+        run it on a schedule when nobody&apos;s watching.
+      </P>
+      <P>
+        When it does propose something, it proposes the <em>complete</em> action — an entire filled form plus
+        the submit button, not one field at a time. You review once, approve once, and it continues from
+        there automatically.
+      </P>
+
+      <H3 id="profile">Form auto-fill</H3>
+      <P>
+        Save your details at <Code>/profile</Code> — name, email, phone, location, links, and a resume for
+        longer fields. Then &quot;find SWE roles at Stripe and apply to the backend one&quot; works end to end: it
+        browses, reads the listings, finds the form, and proposes it filled in for review.
+      </P>
+
+      <H2 id="workflows">Workflows</H2>
+
+      <H3 id="scheduling">Scheduling</H3>
+      <P>
+        Describe a task in plain language at <Code>/workflows</Code>, pick a cadence, and it runs unattended.
+        Each workflow keeps one ongoing conversation across all its runs, so the tenth run still remembers
+        what the first nine found — it can tell you what&apos;s genuinely new.
+      </P>
+      <P>Three consecutive failures auto-disables a workflow and notifies you, rather than failing silently forever.</P>
+
+      <H3 id="notifications">Notifications</H3>
+      <P>
+        Results appear in the in-app bell. Configure SMTP for email as well — works with Gmail, SendGrid,
+        Resend, or SES.
+      </P>
+      <Pre>{`SMTP_HOST="..."
+SMTP_PORT="587"
+SMTP_USER="..."
+SMTP_PASS="..."`}</Pre>
+
+      <H2 id="contributing">Contributing</H2>
+
+      <H3 id="add-provider">Add a provider</H3>
+      <P>
+        If it speaks OpenAI&apos;s chat-completions format, add a preset — no new file needed:
+      </P>
+      <Pre>{`// apps/api/src/providers/index.ts
+myprovider: {
+  baseURL: "https://api.example.com/v1",
+  envKey: "MYPROVIDER_API_KEY",
+  defaultModel: "some-model",
+  models: ["some-model", "another"],
+},`}</Pre>
+      <P>
+        Otherwise copy <Code>providers/anthropic.ts</Code> and implement the <Code>AIProvider</Code> interface.
+      </P>
+
+      <H3 id="add-tool">Add a tool</H3>
+      <P>
+        Add a <Code>ToolDef</Code> to <Code>baseTools</Code> and a matching <Code>case</Code> in{" "}
+        <Code>runTool()</Code>, both in <Code>apps/api/src/tools/index.ts</Code>.
+      </P>
+      <Note tone="warn">
+        One rule that matters: reads execute immediately, writes never do. Anything that changes state must
+        go through <Code>proposeAction</Code> rather than acting directly.
+      </Note>
+
+      <H3 id="pr">Opening a PR</H3>
+      <P>Fork, branch off main, keep it focused, and run these before opening:</P>
+      <Pre>{`pnpm exec tsc --noEmit    # in both apps/api and apps/web
+pnpm test                 # in apps/api`}</Pre>
+      <P>
+        Merged a PR? Open an issue with the link and we&apos;ll upgrade your hosted account to Pro for free.
+      </P>
+    </DocsLayout>
   );
 }

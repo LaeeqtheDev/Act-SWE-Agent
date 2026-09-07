@@ -4,12 +4,13 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import { UserButton } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Send, Loader2, Wrench, Bot, User, Settings, Workflow, LayoutDashboard, Square } from "lucide-react";
+import { ArrowLeft, Send, Loader2, Bot, User, Settings, Workflow, LayoutDashboard, Square } from "lucide-react";
 import { ChatSidebar, type ConversationSummary } from "@/components/agent/chat-sidebar";
 import { SettingsPanel } from "@/components/agent/settings-panel";
 import { ClerkTokenBridge } from "@/components/auth/clerk-token-bridge";
 import { UsageBanner } from "@/components/agent/usage-banner";
 import { AppNav } from "@/components/app-nav";
+import { ToolTrace } from "@/components/agent/tool-trace";
 import { NotificationBell } from "@/components/agent/notification-bell";
 import { ProposedActionCard } from "@/components/agent/proposed-action-card";
 import { isHostedMode } from "@/lib/hosted-mode";
@@ -40,10 +41,10 @@ interface StoredMessage {
 // are removed the moment someone runs `pnpm clear-demo` — leaving
 // suggestions that fail on click.
 const SUGGESTIONS = [
-  "Search the web for the top 3 AI coding tools right now and summarize the differences",
-  "Open news.ycombinator.com and tell me what's on the front page",
-  "Find remote TypeScript jobs posted this week",
-  "Check what's in my inbox that needs a reply",
+  "Compare the top 3 project management tools on pricing and write me a summary",
+  "Find remote jobs posted this week that match my profile",
+  "Research what my competitors are charging and put it in a document",
+  "Check the news on a topic and give me the 5 things that matter",
 ];
 
 // A proposeAction tool result looks like { proposed, actionId, status } —
@@ -70,12 +71,36 @@ export default function AgentChatPage() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   // null = no conversation created yet. One is only created in the backend
   // the moment the user actually sends their first message.
-  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversationId, setConversationId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return window.sessionStorage.getItem("act_active_conversation");
+  });
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (conversationId) window.sessionStorage.setItem("act_active_conversation", conversationId);
+    else window.sessionStorage.removeItem("act_active_conversation");
+  }, [conversationId]);
+
+  // Restoring the id alone did nothing — selectConversation is the only
+  // path that actually fetches a conversation's messages, and it was only
+  // ever called from a sidebar click. Without this, a refresh landed on
+  // the right id but a blank message list, which looked identical to a
+  // fresh chat.
+  const restoredOnMount = useRef(false);
+  useEffect(() => {
+    if (restoredOnMount.current) return;
+    restoredOnMount.current = true;
+    if (conversationId) selectConversation(conversationId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [providerLabel, setProviderLabel] = useState<string | null>(null);
+  const [activity, setActivity] = useState<string | null>(null);
+  const [chromeConnected, setChromeConnected] = useState<boolean | null>(null);
   // undefined until the token bridge reports in. Self-hosted mode reports
   // undefined immediately (no auth needed); hosted mode reports Clerk's
   // real getToken function once available.
@@ -110,17 +135,58 @@ export default function AgentChatPage() {
 
   // Show which model is actually answering, right in the composer — it was
   // previously only visible by opening the settings dialog.
+  // The highest-value capability — reading your actual email and LinkedIn —
+  // is invisible unless CHROME_USER_DATA_DIR is set, and a task that needs
+  // it just fails with no explanation. Tell people it exists.
   useEffect(() => {
-    fetch(`${API_URL}/ai/status`)
+    fetch(`${API_URL}/config`)
       .then((r) => r.json())
-      .then((d) => setProviderLabel(d.configured ? `${d.provider}/${d.model}` : null))
+      .then((d) => setChromeConnected(!!d.chromeProfileConnected))
       .catch(() => {});
-  }, [settingsOpen]);
+  }, []);
+
+  useEffect(() => {
+    // Two real bugs here, together explaining "it resets to the default":
+    // 1. No auth headers were sent, so in hosted mode this always resolved
+    //    as an anonymous request — the server's env default, never the
+    //    signed-in user's saved model.
+    // 2. This effect re-fired on every settingsOpen toggle (i.e. on close),
+    //    which raced the onSaved callback and overwrote the correct label
+    //    with whatever this under-authed fetch returned. Now only runs
+    //    once on mount; onSaved is the sole source of truth after that.
+    if (isHostedMode() && typeof getToken !== "function") return;
+    authHeaders().then((headers) =>
+      fetch(`${API_URL}/ai/status`, { headers })
+        .then((r) => r.json())
+        .then((d) => setProviderLabel(d.configured ? `${d.provider}/${d.model}` : null))
+        .catch(() => {})
+    );
+  }, [authHeaders]);
 
   useEffect(() => {
     if (turns.length === 0) return; // same fix as the landing demo widget — don't scroll on initial mount
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [turns, sending]);
+
+  // A static "thinking..." for 40 seconds reads as broken. Polling progress
+  // shows what it's actually doing right now, which is the difference
+  // between waiting and wondering whether to cancel.
+  useEffect(() => {
+    if (!sending || !conversationId) {
+      setActivity(null);
+      return;
+    }
+    const poll = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_URL}/chat/conversations/${conversationId}/progress`);
+        const data = await res.json();
+        setActivity(data.activity ? `${data.activity}${data.step > 1 ? ` · step ${data.step}` : ""}` : null);
+      } catch {
+        // progress is cosmetic — never let it surface an error
+      }
+    }, 1200);
+    return () => clearInterval(poll);
+  }, [sending, conversationId]);
 
   function startNewChat() {
     setConversationId(null);
@@ -249,6 +315,22 @@ export default function AgentChatPage() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-6 py-8 space-y-6">
+            {turns.length === 0 && chromeConnected === false && (
+              <div className="mb-6 p-4 rounded-lg border border-warn/25 bg-warn/[0.04]">
+                <p className="text-sm text-foreground font-medium mb-1">
+                  Connect your browser to unlock email, LinkedIn, and Slack
+                </p>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  Right now it can browse public sites. Point it at your own Chrome profile and it can
+                  read your actual inbox, draft replies, and act on any site you&apos;re already signed
+                  into — no passwords, it just uses the session you already have.{" "}
+                  <a href="/docs#your-chrome" className="text-warn hover:underline">
+                    How to set it up
+                  </a>
+                </p>
+              </div>
+            )}
+
             {turns.length === 0 && (
               <div className="space-y-3">
                 <p className="text-sm text-muted-foreground">Try asking:</p>
@@ -272,18 +354,7 @@ export default function AgentChatPage() {
                   {turn.role === "user" ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5" />}
                 </div>
                 <div className="flex-1 min-w-0">
-                  {turn.toolTrace && turn.toolTrace.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mb-2">
-                      {turn.toolTrace.map((t, j) => (
-                        <span
-                          key={j}
-                          className="inline-flex items-center gap-1 text-[11px] font-mono bg-muted px-2 py-1 rounded text-muted-foreground"
-                        >
-                          <Wrench className="h-3 w-3" /> {t.name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
+                  {turn.toolTrace && turn.toolTrace.length > 0 && <ToolTrace entries={turn.toolTrace} />}
                   <p className="text-sm whitespace-pre-wrap leading-relaxed">{turn.content}</p>
                   {turn.toolTrace?.map((t, j) => {
                     const pending = extractPendingAction(t);
@@ -311,7 +382,8 @@ export default function AgentChatPage() {
                   <Bot className="h-3.5 w-3.5" />
                 </div>
                 <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> thinking / calling tools...
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  {activity ?? "Thinking"}
                 </div>
               </div>
             )}
@@ -381,7 +453,7 @@ export default function AgentChatPage() {
 
       </main>
 
-      <SettingsPanel apiUrl={API_URL} open={settingsOpen} onOpenChange={setSettingsOpen} getToken={getToken} />
+      <SettingsPanel apiUrl={API_URL} open={settingsOpen} onOpenChange={setSettingsOpen} getToken={getToken} onSaved={setProviderLabel} />
     </div>
   );
 }

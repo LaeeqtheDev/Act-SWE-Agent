@@ -1,3 +1,4 @@
+"use client"
 import Link from "next/link";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import {
@@ -34,6 +35,8 @@ import { PipelineScroll } from "@/components/landing/pipeline-scroll";
 import { DemoChat } from "@/components/landing/demo-chat";
 import { AuthNav } from "@/components/auth/auth-nav";
 import { Comparison } from "@/components/landing/comparison";
+import { HowItWorks } from "@/components/landing/how-it-works";
+import { FAQ } from "@/components/landing/faq";
 
 const plexMono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-mono" });
 const plexSans = IBM_Plex_Sans({ subsets: ["latin"], weight: ["400", "500", "600", "700"], variable: "--font-sans" });
@@ -68,8 +71,8 @@ const useCases = [
   },
   {
     icon: "activity" as const,
-    prompt: "Is payments-api healthy? Restart it if not.",
-    body: "Checks live service health and Kubernetes pod status, then proposes the restart — pending your approval, never automatic.",
+    prompt: "Book me a table for four on Friday evening",
+    body: "Opens the restaurant's site, checks what's available, fills in your details from your saved profile, and shows you the booking before it's confirmed.",
   },
   {
     icon: "clock" as const,
@@ -94,8 +97,8 @@ const workflowExamples = [
   {
     icon: "activity" as const,
     cadence: "Every 30 minutes",
-    title: "Service watch",
-    body: "Check service health and Kubernetes pod status, and propose a restart for anything degraded — pending your approval.",
+    title: "Price & availability watch",
+    body: "Watch a page for changes — a price, a listing, an availability calendar — and tell you the moment something moves.",
   },
 ];
 
@@ -152,52 +155,27 @@ export default function LandingPage() {
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src="/logo.svg" alt="" width={26} height={26} className="rounded-md" />
           <span style={{ fontFamily: "var(--font-mono)" }} className="text-sm tracking-widest uppercase text-foreground">
-            Act · SWE Agent
-          </span>
-          <span className="hidden sm:inline-flex items-center gap-1 text-[10px] uppercase tracking-wide text-muted-foreground border border-border rounded px-2 py-0.5">
-            MIT licensed
+            Act
           </span>
         </div>
         <div className="flex items-center gap-5 text-sm">
-          <Link href="/docs" className="hidden md:inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
-            Docs
+          <Link href="/case-studies" className="hidden md:inline text-muted-foreground hover:text-foreground transition-colors">
+            What it can do
           </Link>
-          <Link href="/case-studies" className="hidden md:inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
-            Case studies
+          <Link href="#pricing" className="hidden md:inline text-muted-foreground hover:text-foreground transition-colors">
+            Pricing
           </Link>
-          <Link href="/about" className="hidden md:inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
+          <Link href="/about" className="hidden lg:inline text-muted-foreground hover:text-foreground transition-colors">
             About
           </Link>
-          <Link href="/dashboard" className="hidden sm:inline-flex items-center gap-1 text-muted-foreground hover:text-foreground transition-colors">
-            Incidents
+          <Link href="/docs" className="hidden lg:inline text-muted-foreground hover:text-foreground transition-colors">
+            Docs
           </Link>
-          <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
-            <Star className="h-3.5 w-3.5" /> Star
-          </a>
           <AuthNav />
         </div>
       </nav>
 
       <HeroSection />
-
-      {/* Live demo — the highest-leverage thing on this page: people try
-          things, they don't read feature lists. */}
-      <section className="border-b border-border">
-        <div className="max-w-3xl mx-auto px-6 md:px-8 py-20">
-          <Reveal className="text-center mb-6">
-            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
-              No signup
-            </p>
-            <h2 className="text-2xl md:text-3xl font-semibold text-foreground">Try it right now.</h2>
-            <p className="mt-2 text-sm text-muted-foreground">
-              A small read-only slice of the real agent — ask it about the demo services below.
-            </p>
-          </Reveal>
-          <Reveal delay={0.1}>
-            <DemoChat />
-          </Reveal>
-        </div>
-      </section>
 
       {/* What it does */}
       <section className="border-y border-border bg-card">
@@ -234,6 +212,23 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* How it works */}
+      <section id="how-it-works" className="border-b border-border">
+        <div className="py-20">
+          <div className="max-w-2xl mx-auto px-6 md:px-8 mb-12">
+            <Reveal>
+              <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+                How it works
+              </p>
+              <h2 className="text-2xl md:text-3xl font-semibold text-foreground">
+                Four steps. No configuration.
+              </h2>
+            </Reveal>
+          </div>
+          <HowItWorks />
+        </div>
+      </section>
+
       {/* Comparison */}
       <section className="border-b border-border">
         <div className="py-20">
@@ -248,6 +243,26 @@ export default function LandingPage() {
             </Reveal>
           </div>
           <Comparison />
+        </div>
+      </section>
+
+      {/* Live demo — the highest-leverage thing on this page: people try
+          things, they don't read feature lists. */}
+      <section className="border-b border-border">
+        <div className="max-w-3xl mx-auto px-6 md:px-8 py-20">
+          <Reveal className="text-center mb-6">
+            <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-muted-foreground mb-3">
+              No signup, no card
+            </p>
+            <h2 className="text-2xl md:text-3xl font-semibold text-foreground">Try it right here.</h2>
+            <p className="mt-2 text-sm text-muted-foreground">
+              A read-only slice of the real agent, running live on this page. The full version browses,
+              fills forms, and acts on your behalf.
+            </p>
+          </Reveal>
+          <Reveal delay={0.1}>
+            <DemoChat />
+          </Reveal>
         </div>
       </section>
 
@@ -317,11 +332,11 @@ export default function LandingPage() {
               <div className="h-full p-6 rounded-lg border border-border flex flex-col">
                 <p className="text-foreground font-medium">Free</p>
                 <p style={{ fontFamily: "var(--font-mono)" }} className="text-3xl text-foreground mt-3">$0</p>
-                <p className="text-xs text-muted-foreground mt-1">10 agent tasks / month</p>
+                <p className="text-xs text-muted-foreground mt-1">10 tasks a month</p>
                 <ul className="mt-6 space-y-2 text-sm text-muted-foreground flex-1">
                   <li>Full dashboard + chat agent</li>
-                  <li>Fast/economy hosted model</li>
-                  <li>All read tools + gated write tools</li>
+                  <li>Fast, capable AI model included</li>
+                  <li>Real browser control, with your approval</li>
                 </ul>
                 <Link href="/agent" className="mt-6 text-center px-4 py-2 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors text-sm">
                   Start free
@@ -338,12 +353,12 @@ export default function LandingPage() {
                 <p style={{ fontFamily: "var(--font-mono)" }} className="text-3xl text-foreground mt-3">
                   $30<span className="text-sm text-muted-foreground">/mo</span>
                 </p>
-                <p className="text-xs text-muted-foreground mt-1">500 agent tasks / month</p>
+                <p className="text-xs text-muted-foreground mt-1">500 tasks a month</p>
                 <ul className="mt-6 space-y-2 text-sm text-muted-foreground flex-1">
                   <li>Everything in Free</li>
-                  <li>Premium hosted models (GPT-4o / Sonnet class)</li>
-                  <li>Priority task queue</li>
-                  <li>Bring your own key instead, anytime — no lock-in</li>
+                  <li>Smarter models for harder tasks</li>
+                  <li>Priority processing</li>
+                  <li>Or use your own AI key — no limits at all</li>
                 </ul>
                 <Link href="/billing" className="mt-6 text-center px-4 py-2 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity text-sm">
                   Upgrade
@@ -353,16 +368,16 @@ export default function LandingPage() {
 
             <Reveal delay={0.15}>
               <div className="h-full p-6 rounded-lg border border-border flex flex-col">
-                <p className="text-foreground font-medium">Self-hosted</p>
+                <p className="text-foreground font-medium">Run it yourself</p>
                 <p style={{ fontFamily: "var(--font-mono)" }} className="text-3xl text-foreground mt-3">$0</p>
-                <p className="text-xs text-muted-foreground mt-1">Unlimited — MIT licensed</p>
+                <p className="text-xs text-muted-foreground mt-1">Unlimited, on your own computer</p>
                 <ul className="mt-6 space-y-2 text-sm text-muted-foreground flex-1">
-                  <li>Fork it, run it on your own infra</li>
-                  <li>No task limits, no account needed</li>
-                  <li>Bring your own key for any provider</li>
+                  <li>Runs entirely on your own computer</li>
+                  <li>No limits, no account needed</li>
+                  <li>Works with any AI provider you like</li>
                 </ul>
                 <a href={REPO_URL} target="_blank" rel="noreferrer" className="mt-6 text-center px-4 py-2 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors text-sm">
-                  Fork on GitHub
+                  Get the code
                 </a>
               </div>
             </Reveal>
@@ -374,20 +389,38 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* FAQ */}
+      <section className="border-b border-border">
+        <div className="py-20">
+          <div className="max-w-2xl mx-auto px-6 md:px-8 mb-10">
+            <Reveal>
+              <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+                Questions
+              </p>
+              <h2 className="text-2xl md:text-3xl font-semibold text-foreground">
+                The things worth asking first.
+              </h2>
+            </Reveal>
+          </div>
+          <FAQ />
+        </div>
+      </section>
+
       {/* CTA */}
       <section>
         <div className="max-w-6xl mx-auto px-6 md:px-8 py-20 text-center">
           <Reveal className="flex flex-col items-center">
             <Key className="h-6 w-6 text-warn mb-4" />
-            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-lg">
-              Clone it. Add your key. Talk to it.
+            <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-xl">
+              Stop reading about it. Give it something to do.
             </h2>
             <p className="mt-4 text-muted-foreground max-w-md">
-              MIT licensed, self-hostable, no account required. Fork the repo and make it yours.
+              Free to start, no card required. Or run the whole thing on your own computer — it&apos;s
+              open source and always will be.
             </p>
             <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
               <Link href="/agent" className="inline-flex items-center gap-2 px-6 py-3 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity">
-                Chat with the agent <ArrowRight className="h-4 w-4" />
+                Start free <ArrowRight className="h-4 w-4" />
               </Link>
               <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-6 py-3 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
                 <Star className="h-4 w-4" /> Star on GitHub
@@ -398,18 +431,65 @@ export default function LandingPage() {
       </section>
 
       <footer className="border-t border-border">
-        <div className="max-w-6xl mx-auto px-6 md:px-8 py-8 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-muted-foreground">
-          <span style={{ fontFamily: "var(--font-mono)" }}>Act · SWE Agent — MIT licensed, open source</span>
-          <div className="flex items-center gap-5">
-            <a href={REPO_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors inline-flex items-center gap-1">
-              Repository <ExternalLink className="h-3 w-3" />
-            </a>
-            <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors inline-flex items-center gap-1">
-              GitHub <ExternalLink className="h-3 w-3" />
-            </a>
-            <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors inline-flex items-center gap-1">
-              LinkedIn <ExternalLink className="h-3 w-3" />
-            </a>
+        <div className="max-w-6xl mx-auto px-6 md:px-8 py-14">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8 mb-12">
+            <div className="col-span-2 md:col-span-1">
+              <div className="flex items-center gap-2.5 mb-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src="/logo.svg" alt="" width={24} height={24} className="rounded-md" />
+                <span style={{ fontFamily: "var(--font-mono)" }} className="text-sm tracking-widest uppercase text-foreground">
+                  Act
+                </span>
+              </div>
+              <p className="text-sm text-muted-foreground leading-relaxed max-w-xs">
+                An AI assistant that opens a real browser and gets things done — with your approval on
+                anything that matters.
+              </p>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-foreground mb-3">Product</p>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                <li><Link href="/agent" className="hover:text-foreground transition-colors">Chat</Link></li>
+                <li><Link href="/workflows" className="hover:text-foreground transition-colors">Workflows</Link></li>
+                <li><Link href="#pricing" className="hover:text-foreground transition-colors">Pricing</Link></li>
+                <li><Link href="#how-it-works" className="hover:text-foreground transition-colors">How it works</Link></li>
+              </ul>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-foreground mb-3">Resources</p>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                <li><Link href="/docs" className="hover:text-foreground transition-colors">Documentation</Link></li>
+                <li><Link href="/case-studies" className="hover:text-foreground transition-colors">What it can do</Link></li>
+                <li><Link href="/about" className="hover:text-foreground transition-colors">About</Link></li>
+                <li>
+                  <a href={REPO_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors inline-flex items-center gap-1">
+                    Source code <ExternalLink className="h-3 w-3" />
+                  </a>
+                </li>
+              </ul>
+            </div>
+
+            <div>
+              <p className="text-xs font-medium text-foreground mb-3">Legal</p>
+              <ul className="space-y-2 text-sm text-muted-foreground">
+                <li><Link href="/privacy" className="hover:text-foreground transition-colors">Privacy policy</Link></li>
+                <li><Link href="/terms" className="hover:text-foreground transition-colors">Terms of service</Link></li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="pt-8 border-t border-border flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-muted-foreground">
+            <span>&copy; {new Date().getFullYear()} Act. Open source under the MIT license.</span>
+            <div className="flex items-center gap-5">
+              <a href={GITHUB_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors">
+                GitHub
+              </a>
+              <a href={LINKEDIN_URL} target="_blank" rel="noreferrer" className="hover:text-foreground transition-colors">
+                LinkedIn
+              </a>
+            </div>
           </div>
         </div>
       </footer>

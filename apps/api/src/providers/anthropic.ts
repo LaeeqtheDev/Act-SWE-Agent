@@ -7,7 +7,7 @@ export function createAnthropicProvider(apiKey: string, model: string): AIProvid
   return {
     name: "anthropic",
     model,
-    async runTurn({ system, tools, history }) {
+    async runTurn({ system, tools, history, signal }) {
       const anthropicTools: Anthropic.Tool[] = tools.map((t) => ({
         name: t.name,
         description: t.description,
@@ -33,13 +33,16 @@ export function createAnthropicProvider(apiKey: string, model: string): AIProvid
         }
       }
 
-      const response = await client.messages.create({
-        model,
-        max_tokens: 1500,
-        system,
-        tools: anthropicTools,
-        messages,
-      });
+      const response = await client.messages.create(
+        {
+          model,
+          max_tokens: 1500,
+          system,
+          tools: anthropicTools,
+          messages,
+        },
+        { signal }
+      );
 
       const toolUses = response.content.filter((b): b is Anthropic.ToolUseBlock => b.type === "tool_use");
       const textBlock = response.content.find((b): b is Anthropic.TextBlock => b.type === "text");

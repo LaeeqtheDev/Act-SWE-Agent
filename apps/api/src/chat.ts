@@ -1,63 +1,37 @@
 import { PrismaClient } from "@prisma/client";
 import { getProvider } from "./providers/index.js";
 import type { AgentMessage, ToolCall } from "./providers/index.js";
-import { getTools, runTool, compactHistoryForRequest } from "./tools/index.js";
-import { checkAndIncrementUsage, UsageLimitError } from "./usage.js";
+import { getTools, runTool, compactHistoryForRequest, setConnectedServices } from "./tools/index.js";
+import { listConnections } from "./connections.js";
+import { closeSession, markSessionCancelled, clearSessionCancelled } from "./tools/browser.js";
+import { setProgress, clearProgress, describeTool } from "./progress.js";
+import { checkAndIncrementUsage, UsageLimitError, isPleasantry, chargeExtraSteps } from "./usage.js";
 import { detectToolFailure, reportAgentIncident } from "./agent-incidents.js";
 import { toolCallsTotal, chatMessagesTotal } from "./metrics.js";
 
 const prisma = new PrismaClient();
 
-const CHAT_SYSTEM_PROMPT = `You are Act SWE Agent — an open-source, model-agnostic AI agent that gets real work done
-on the user's behalf. You can:
-- Check the health, telemetry, and incident history of the platform's services, and read live Kubernetes data
-- Browse the web in a real browser (browseWeb) — and if CHROME_USER_DATA_DIR is set, that's the user's OWN
-  logged-in Chrome, so Gmail, Calendar, Docs, LinkedIn, Facebook, Instagram, WhatsApp Web, Slack, X, and any
-  other site they're signed into all work with their real session
-- Click through pages freely (clickToNavigate) — buttons, tabs, "next page", "show more", expanding a listing
-- Look up the user's saved details (getUserProfile) to fill forms with their real information
-- Read the project's own files if local dev tools are enabled
-- Propose write actions (proposeAction) — the only things that need approval
+const CHAT_SYSTEM_PROMPT = `You are Act — an AI agent that finishes real tasks, not a chatbot that describes how to.
+Reads (browseWeb, clickToNavigate, scrollPage, goBack, readPageAsMarkdown, webSearch, getUserProfile) need
+no approval — use them freely and keep going. Only proposeAction (form submit, send, post, restart, file
+edit, shell command) needs the user's sign-off, and always as one complete action, never a fragment.
 
-HOW TO WORK — this matters more than anything else here:
-
-Finish the job. When someone says "find SWE jobs at Stripe," they want the actual list of jobs, not a
-running commentary. Browse the careers page, click into the listings, read them, and come back with real
-roles and links. When they say "apply to this," go to the application form, call getUserProfile, and
-propose the completed form with their details already filled in. Chain as many browseWeb and
-clickToNavigate calls as the task needs — that's what they're for.
-
-When the task is to DO something on a page — play a video, open a result, start something — browsing to
-the page is only step one. Read the interactiveElements you got back, pick the one that matches, and
-clickToNavigate it. Don't stop after loading the page and describe what you see; the user asked you to
-act, so act. "Play the top song" means: search, then click the actual video.
-
-Be efficient. webSearch returns real results with titles, URLs, and snippets — if those answer the
-question, ANSWER IT. Don't browse every result "to be thorough"; each page you open costs a turn you
-may need later. Only browseWeb when a snippet is genuinely insufficient. You have a limited number of
-turns, so spend them on the answer, not on confirming what you already found.
-
-Never ask permission to look, read, click through, or navigate. clickToNavigate needs no approval and
-never will: opening a page, switching a tab, or expanding a listing changes nothing. Use it freely and
-keep going.
-
-ONLY these need approval, via proposeAction: submitting a form or application (use type "form_fill" with
-every field at once — never one approval per field), sending a message or email, posting or commenting,
-restarting a pod, rolling back, editing a file, running a shell command. If it sends, posts, submits, or
-applies, propose it. If it just looks or moves, do it yourself.
-
-When you do propose something, propose the COMPLETE action — the whole filled form and the submit button
-together, not a fragment. The user should see one clear thing to approve, do it once, and be done.
-
-proposeAction never executes anything itself. Never say a form was submitted, a message sent, or a file
-created unless a tool result says so. After proposing, stop narrating that action — you'll get a real
-follow-up here when it completes, and you should continue the task from there automatically.
-
-If getUserProfile comes back empty and a form needs personal details, say plainly that saving their info
-in Settings will let you fill forms automatically next time, and ask only for what you need right now.
-
-No emoji, ever. Plain text, direct and concise. Report what you actually found and did — not what you're
-about to try.`;
+RULES, in priority order:
+1. Finish the job. "Find X" means come back with real results, not a status update. Chain tool calls —
+   several browseWeb in one turn if you need several pages — until you have the answer.
+2. Act, don't describe. Loading a page is step one. "Play the top song" = search, then open the video
+   (use its href directly if interactiveElements has one — faster than clicking through).
+3. "Thanks"/"ok"/similar = talk, not work. Reply in one line, call no tools.
+4. Never Google-search or web-search for a CSS selector — the fields you need are always already in
+   interactiveElements from your last browseWeb ("textarea field (empty)" = an empty box you can type
+   into). Never navigate to google.com's search box; webSearch exists so you don't have to.
+5. Verify before claiming success: after typing/submitting, verifyPageContains a phrase you entered. Not
+   found = it didn't work — say so, don't claim otherwise.
+6. Don't re-browse a page you're already on (wastes a step, wipes what you typed). Empty results? Scroll
+   first — feeds lazy-load. Wrong page? goBack, don't re-search. Click failed on a dynamic page? waitForElement, retry.
+7. proposeAction never executes anything itself — don't narrate it as done. You'll get a real follow-up
+   once it completes.
+8. No emoji. Plain, direct, concise — report what happened, not what you're about to try.`;
 
 export async function createConversation(title?: string, userId?: string) {
   return prisma.conversation.create({ data: { title, userId } });
@@ -122,8 +96,18 @@ export interface ChatReply {
 // and resumeAfterAction() (an approved action completing, continuing the
 // task automatically) both funnel through this — the only difference is
 // whether it counts against the usage limit.
-async function runAgentLoop(conversationId: string, userText: string, userId: string | undefined, chargeUsage: boolean): Promise<ChatReply> {
-  if (userId && chargeUsage) {
+async function runAgentLoop(
+  conversationId: string,
+  userText: string,
+  userId: string | undefined,
+  chargeUsage: boolean,
+  cancelled?: AbortController
+): Promise<ChatReply> {
+  // Don't charge a task for "thanks" — see isPleasantry for why this is a
+  // real check and not just a prompt instruction.
+  const freeTurn = isPleasantry(userText);
+
+  if (userId && chargeUsage && !freeTurn) {
     try {
       await checkAndIncrementUsage(userId);
     } catch (err) {
@@ -131,6 +115,23 @@ async function runAgentLoop(conversationId: string, userText: string, userId: st
       throw err;
     }
   }
+
+  // Fires the instant the user presses Stop, rather than waiting for the
+  // loop to reach its next checkpoint — that gap is how a browser launch
+  // slipped through.
+  cancelled?.signal.addEventListener("abort", () => {
+    markSessionCancelled(conversationId);
+    closeSession(conversationId).catch(() => {});
+  });
+
+  // A previously cancelled conversation must be usable again on the next
+  // message, or the browser would stay permanently blocked.
+  clearSessionCancelled(conversationId);
+
+  // Refresh which integrations are available before building the tool list.
+  await listConnections(userId)
+    .then((c) => setConnectedServices(c.connected.map((x: { service: string }) => x.service)))
+    .catch(() => setConnectedServices([]));
 
   const provider = await getProvider(userId);
   if (!provider) {
@@ -159,11 +160,60 @@ async function runAgentLoop(conversationId: string, userText: string, userId: st
 
   const toolTrace: ChatReply["toolTrace"] = [];
   let finalText = "";
+  let stepsUsed = 0;
 
   try {
-    const maxTurns = Number(process.env.AGENT_MAX_TURNS) || 10;
+    const maxTurns = Number(process.env.AGENT_MAX_TURNS) || 16;
     for (let turn = 0; turn < maxTurns; turn++) {
-      const result = await provider.runTurn({ system: CHAT_SYSTEM_PROMPT, tools: getTools(), history: compactHistoryForRequest(history) });
+      // Checked between turns and again between tool calls below — a
+      // cancelled request stops at the next boundary rather than running to
+      // completion in the background.
+      if (cancelled?.signal.aborted) {
+        markSessionCancelled(conversationId);
+        closeSession(conversationId).catch(() => {});
+        return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
+      }
+
+      stepsUsed++;
+      setProgress(conversationId, stepsUsed, "Thinking");
+
+      // Without this the model has no sense of its budget and explores
+      // right up until it's cut off with nothing to show.
+      const remaining = maxTurns - turn;
+      const budgetNote =
+        remaining <= 3
+          ? `\n\nYou have ${remaining} step(s) left. Finish and answer with what you have now — do not start anything new.`
+          : "";
+
+      // A 413 means the WHOLE request — system prompt, every tool schema,
+      // and the trimmed history — still exceeds the model's per-minute
+      // token cap in one shot. That happens specifically on small free
+      // tiers (Groq's is 8,000/min) once enough tools are offered, and the
+      // previous fix only ever softened history over MULTIPLE turns — it
+      // never reacted to a single oversized request failing outright. Retry
+      // once, immediately, with history cut far harder (last tool result
+      // only, each capped at 60 chars instead of 200) rather than losing
+      // the whole task to one over-budget call.
+      let result;
+      try {
+        result = await provider.runTurn({
+          signal: cancelled?.signal,
+          system: CHAT_SYSTEM_PROMPT + budgetNote,
+          tools: freeTurn ? [] : getTools(),
+          history: compactHistoryForRequest(history),
+        });
+      } catch (err) {
+        const status = (err as { status?: number })?.status;
+        const isTooLarge = status === 413 || /too large|request too large/i.test(String((err as Error)?.message ?? ""));
+        if (!isTooLarge) throw err;
+
+        result = await provider.runTurn({
+          signal: cancelled?.signal,
+          system: CHAT_SYSTEM_PROMPT + budgetNote,
+          tools: freeTurn ? [] : getTools(),
+          history: compactHistoryForRequest(history, 1, 60),
+        });
+      }
 
       if (result.toolCalls.length === 0) {
         finalText = result.text ?? "";
@@ -175,14 +225,44 @@ async function runAgentLoop(conversationId: string, userText: string, userId: st
         data: { conversationId, role: "assistant", content: result.text ?? "", toolCalls: result.toolCalls as object },
       });
 
-      for (const call of result.toolCalls) {
-        const output = await runTool(call.name, call.input, { conversationId, userId });
+      if (cancelled?.signal.aborted) return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
+
+      // Tools that only READ can run at the same time — three web searches
+      // took three times as long as one for no reason. Anything that drives
+      // the shared browser page (clicking, scrolling, going back) must stay
+      // sequential, since they'd otherwise fight over the same tab.
+      // webSearch was removed from this list: it now drives the SHARED
+      // browser page (so searches are visible), which means two running at
+      // once navigate the same tab and overwrite each other's results.
+      // Everything left here touches no shared state.
+      const PARALLEL_SAFE = new Set(["listServices", "listIncidents", "getServiceHealth", "getRecentErrors", "getDeploymentHistory", "getKubernetesPodStatus", "getKubernetesEvents", "readProjectFile", "listProjectDirectory", "getUserProfile"]);
+
+      const runOne = async (call: ToolCall) => {
+        setProgress(conversationId, stepsUsed, describeTool(call.name));
+        const output = await runTool(call.name, call.input, { conversationId, userId, signal: cancelled?.signal });
         detectToolFailure(call.name, output).catch(() => {});
         toolCallsTotal.inc({ tool: call.name, outcome: output && typeof output === "object" && "error" in output ? "error" : "success" });
-        toolTrace.push({ name: call.name, input: call.input, output });
-        history.push({ role: "tool", toolCallId: call.id, toolName: call.name, content: JSON.stringify(output) });
+        return { call, output };
+      };
+
+      const parallel = result.toolCalls.filter((t) => PARALLEL_SAFE.has(t.name));
+      const sequential = result.toolCalls.filter((t) => !PARALLEL_SAFE.has(t.name));
+
+      const results = await Promise.all(parallel.map(runOne));
+      for (const call of sequential) {
+        if (cancelled?.signal.aborted) return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
+        results.push(await runOne(call));
+      }
+
+      // Persist in the model's original call order so the transcript stays
+      // coherent regardless of which finished first.
+      for (const call of result.toolCalls) {
+        const found = results.find((r) => r.call.id === call.id);
+        if (!found) continue;
+        toolTrace.push({ name: call.name, input: call.input, output: found.output });
+        history.push({ role: "tool", toolCallId: call.id, toolName: call.name, content: JSON.stringify(found.output) });
         await prisma.chatMessage.create({
-          data: { conversationId, role: "tool", content: JSON.stringify(output), toolName: call.name, toolCallId: call.id },
+          data: { conversationId, role: "tool", content: JSON.stringify(found.output), toolName: call.name, toolCallId: call.id },
         });
       }
     }
@@ -207,6 +287,13 @@ async function runAgentLoop(conversationId: string, userText: string, userId: st
       finalText = "I ran out of steps before finishing that. Try narrowing it down, or ask me to pick up where I left off.";
     }
   } catch (err) {
+    // An abort is the user pressing Stop, not a failure worth logging or
+    // reporting as an error.
+    if (cancelled?.signal.aborted || (err as { name?: string })?.name === "AbortError") {
+      markSessionCancelled(conversationId);
+      closeSession(conversationId).catch(() => {});
+      return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
+    }
     console.error("[chat] tool-calling loop failed:", err);
     const message = err instanceof Error ? err.message : "unknown error";
     // A rate limit isn't a mysterious failure — say what it is and what to
@@ -217,18 +304,31 @@ async function runAgentLoop(conversationId: string, userText: string, userId: st
     reportAgentIncident(provider.name, message, conversationId).catch(() => {});
   }
 
+  clearProgress(conversationId);
   await prisma.chatMessage.create({ data: { conversationId, role: "assistant", content: finalText } });
+
+  // The first step was already charged up front; bill whatever else the
+  // task actually consumed. Fire-and-forget — a billing hiccup shouldn't
+  // fail a reply the user already received.
+  if (userId && chargeUsage && !freeTurn && stepsUsed > 1) {
+    chargeExtraSteps(userId, stepsUsed - 1).catch(() => {});
+  }
 
   return { reply: finalText, toolTrace, provider: `${provider.name}/${provider.model}` };
 }
 
-export async function sendMessage(conversationId: string, userText: string, userId?: string): Promise<ChatReply> {
+export async function sendMessage(
+  conversationId: string,
+  userText: string,
+  userId?: string,
+  cancelled?: AbortController
+): Promise<ChatReply> {
   chatMessagesTotal.inc();
   // Hosted mode only — self-hosted/BYOK runs (no userId) never hit a limit,
   // and ownership is verified so one user can never message into another's
   // conversation even if they somehow knew its id.
   if (userId) await assertOwnership(conversationId, userId);
-  return runAgentLoop(conversationId, userText, userId, true);
+  return runAgentLoop(conversationId, userText, userId, true, cancelled);
 }
 
 const MAX_AUTO_CONTINUE_DEPTH = 5;

@@ -1,5 +1,7 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import multer from "multer";
 import fs from "node:fs";
 import { PrismaClient } from "@prisma/client";
@@ -9,12 +11,14 @@ import { getProvider, OPENAI_COMPATIBLE_PRESETS, ANTHROPIC_MODELS, isPremiumMode
 import { createConversation, listConversations, getConversationMessages, sendMessage, renameConversation, deleteConversation, deleteEmptyConversations } from "./chat.js";
 import { getProviderSettings, saveProviderSettings } from "./settings.js";
 import { getUsage } from "./usage.js";
-import { createCheckoutSession, handleStripeWebhook, submitReceipt, listPendingPayments, reviewPendingPayment, listAllPayments, getPayment, getBankDetails, createPortalSession, cancelSubscription, listUsers, setUserPlan } from "./billing.js";
+import { createCheckoutSession, handleStripeWebhook, submitReceipt, listPendingPayments, reviewPendingPayment, listAllPayments, getPayment, getBankDetails, createPortalSession, cancelSubscription, listUsers, setUserPlan, listMyPayments } from "./billing.js";
 import { checkDemoRateLimit, runDemoChat, type DemoTurn } from "./demo.js";
 import { listAgentIncidents, resolveAgentIncident } from "./agent-incidents.js";
 import { initScheduler, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, listWorkflowRuns, runWorkflowNow } from "./workflows.js";
 import { listNotifications, unreadCount, markRead, markAllRead } from "./notifications.js";
 import { metricsMiddleware, renderMetrics, metricsContentType } from "./metrics.js";
+import { getProgress } from "./progress.js";
+import { buildAuthUrl, handleCallback, listConnections, disconnect, type Service } from "./connections.js";
 import { storeUploadedFile, getReceiptFile } from "./storage.js";
 import { exportTrainingDataJsonl, countEligibleConversations } from "./fine-tuning.js";
 import { getUserProfile, saveUserProfile } from "./profile.js";
@@ -34,7 +38,59 @@ process.on("unhandledRejection", (reason) => {
 const prisma = new PrismaClient();
 const PORT = 4000;
 
-app.use(cors());
+// Standard security headers (HSTS, no-sniff, frame protection). One line,
+// and it closes a whole category of trivial issues.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+
+// `cors()` with no arguments allows EVERY origin — meaning any website a
+// user visits could call this API with their credentials. In production
+// only the configured frontend is allowed. Self-hosting keeps the open
+// default, since there's no cross-origin risk on your own machine.
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors(
+    allowedOrigins.length > 0
+      ? {
+          origin: (origin, cb) => {
+            // Same-origin and server-to-server requests have no Origin header.
+            if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+            cb(new Error("Not allowed by CORS"));
+          },
+          credentials: true,
+        }
+      : undefined
+  )
+);
+
+if (allowedOrigins.length === 0 && process.env.NODE_ENV === "production") {
+  console.warn(
+    "[security] ALLOWED_ORIGINS is not set in production — the API is accepting requests from any origin. " +
+      'Set ALLOWED_ORIGINS="https://yourdomain.com" before exposing this publicly.'
+  );
+}
+
+// A per-user usage limit is checked per TASK, which does nothing to stop
+// someone firing hundreds of requests a minute. This caps request RATE,
+// which is what actually protects the provider bill and the database.
+const chatLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.CHAT_RATE_LIMIT) || 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests — slow down for a moment." },
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: Number(process.env.WRITE_RATE_LIMIT) || 40,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests — slow down for a moment." },
+});
 
 // Stripe's webhook needs the RAW request body to verify its signature —
 // registered here, before the global JSON parser below, or the body would
@@ -54,7 +110,7 @@ app.post("/billing/webhook", express.raw({ type: "application/json" }), async (r
   }
 });
 
-app.use(express.json());
+app.use(express.json({ limit: "256kb" }));
 app.use(metricsMiddleware);
 
 app.get("/metrics", async (req, res) => {
@@ -119,7 +175,7 @@ app.get("/usage", async (req, res) => {
 // --- Billing (Phase 5) ---
 // All hosted-mode-only. Self-hosted deployments never touch any of this.
 
-app.post("/billing/checkout", async (req, res) => {
+app.post("/billing/checkout", writeLimiter, async (req, res) => {
   if (!HOSTED_MODE) return res.status(400).json({ error: "Billing only applies in hosted mode." });
   const userId = await currentUserId(req);
   if (!userId) return res.status(401).json({ error: "Sign in required." });
@@ -181,6 +237,15 @@ function requireAdmin(req: express.Request, res: express.Response): boolean {
   }
   return true;
 }
+
+// A user checking their own bank-transfer status. Without this they submit
+// a receipt and have no idea whether it's been seen.
+app.get("/billing/my-payments", async (req, res) => {
+  if (!HOSTED_MODE) return res.json([]);
+  const userId = await currentUserId(req);
+  if (!userId) return res.status(401).json({ error: "Sign in required." });
+  res.json(await listMyPayments(userId));
+});
 
 app.get("/billing/pending", async (req, res) => {
   if (!requireAdmin(req, res)) return;
@@ -312,7 +377,7 @@ app.get("/settings/provider", async (req, res) => {
   });
 });
 
-app.post("/settings/provider", async (req, res) => {
+app.post("/settings/provider", writeLimiter, async (req, res) => {
   const { provider, model, apiKey } = req.body ?? {};
   if (!provider || !model) return res.status(400).json({ error: "provider and model are required" });
   try {
@@ -396,10 +461,17 @@ app.get("/workflows", async (req, res) => {
 app.post("/workflows", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  const { name, prompt, cron, notifyOnRun } = req.body ?? {};
+  const { name, prompt, cron, notifyOnRun, stages } = req.body ?? {};
   if (!name || !prompt || !cron) return res.status(400).json({ error: "name, prompt, and cron are required" });
   try {
-    const workflow = await createWorkflow({ name, prompt, cron, notifyOnRun, userId });
+    const workflow = await createWorkflow({
+      name,
+      prompt,
+      cron,
+      stages: Array.isArray(stages) ? stages.filter((s: unknown) => typeof s === "string" && s.trim()) : undefined,
+      notifyOnRun,
+      userId,
+    });
     res.json(workflow);
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : "failed to create workflow" });
@@ -409,8 +481,8 @@ app.post("/workflows", async (req, res) => {
 app.patch("/workflows/:id", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  const { name, prompt, cron, enabled, notifyOnRun } = req.body ?? {};
-  const workflow = await updateWorkflow(req.params.id, { name, prompt, cron, enabled, notifyOnRun });
+  const { name, prompt, cron, enabled, notifyOnRun, stages } = req.body ?? {};
+  const workflow = await updateWorkflow(String(req.params.id), { name, prompt, cron, enabled, notifyOnRun, stages });
   res.json(workflow);
 });
 
@@ -421,10 +493,10 @@ app.delete("/workflows/:id", async (req, res) => {
   res.json({ deleted: true });
 });
 
-app.post("/workflows/:id/run", async (req, res) => {
+app.post("/workflows/:id/run", chatLimiter, async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  runWorkflowNow(req.params.id).catch((err) => console.error("[workflows] manual run failed:", err));
+  runWorkflowNow(String(req.params.id)).catch((err) => console.error("[workflows] manual run failed:", err));
   res.json({ started: true });
 });
 
@@ -463,7 +535,7 @@ app.get("/profile", async (req, res) => {
   res.json((await getUserProfile(userId)) ?? {});
 });
 
-app.post("/profile", async (req, res) => {
+app.post("/profile", writeLimiter, async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
   const saved = await saveUserProfile(req.body ?? {}, userId);
@@ -476,6 +548,9 @@ app.post("/profile", async (req, res) => {
 // (usually: the server wasn't restarted).
 app.get("/config", (req, res) => {
   res.json({
+    // Surfaced to the UI so it can tell the user WHY email and LinkedIn
+    // tasks aren't working, instead of those tasks just failing silently.
+    chromeProfileConnected: !!process.env.CHROME_USER_DATA_DIR,
     hostedMode: HOSTED_MODE,
     clerkConfigured: !!process.env.CLERK_SECRET_KEY && !!process.env.CLERK_PUBLISHABLE_KEY,
     stripeConfigured: !!process.env.STRIPE_SECRET_KEY,
@@ -485,6 +560,52 @@ app.get("/config", (req, res) => {
     localDevTools: process.env.ENABLE_LOCAL_DEV_TOOLS === "true",
     chromeProfile: !!process.env.CHROME_USER_DATA_DIR,
   });
+});
+
+// Polled by the chat UI while a task is running, so the user sees "Opening
+// a page" instead of a static spinner.
+app.get("/chat/conversations/:id/progress", async (req, res) => {
+  res.json(getProgress(String(req.params.id)) ?? { step: 0, activity: null });
+});
+
+// --- Integrations (Slack, Notion) ---
+
+app.get("/connections", async (req, res) => {
+  const userId = await currentUserId(req);
+  res.json(await listConnections(userId));
+});
+
+// Redirects to the provider's consent screen. Signed state carries the user
+// id, so the callback knows who authorised without needing a session there.
+app.get("/connections/:service/start", async (req, res) => {
+  const service = String(req.params.service) as Service;
+  if (service !== "slack" && service !== "notion") return res.status(400).json({ error: "Unknown service." });
+  try {
+    const userId = await currentUserId(req);
+    res.redirect(buildAuthUrl(service, userId));
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "Couldn't start the connection." });
+  }
+});
+
+app.get("/connections/:service/callback", async (req, res) => {
+  const service = String(req.params.service) as Service;
+  const web = process.env.PUBLIC_WEB_URL || "http://localhost:3000";
+  try {
+    const { workspaceName } = await handleCallback(service, String(req.query.code ?? ""), String(req.query.state ?? ""));
+    // Back to the app rather than leaving the user on a JSON blob.
+    res.redirect(`${web}/settings/connections?connected=${service}&workspace=${encodeURIComponent(workspaceName)}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Connection failed.";
+    res.redirect(`${web}/settings/connections?error=${encodeURIComponent(message)}`);
+  }
+});
+
+app.post("/connections/:service/disconnect", writeLimiter, async (req, res) => {
+  const service = String(req.params.service) as Service;
+  const userId = await currentUserId(req);
+  await disconnect(service, userId);
+  res.json({ disconnected: true });
 });
 
 app.get("/health", (req, res) => {
@@ -614,12 +735,12 @@ app.post("/incidents/:id/resolve", async (req, res) => {
 // (DB + best-effort Kubernetes), then stores the structured result as an
 // AgentAction of type "investigation" so it's visible in the incident's history.
 
-app.post("/incidents/:id/investigate", async (req, res) => {
+app.post("/incidents/:id/investigate", chatLimiter, async (req, res) => {
   try {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return; // response already sent (401)
 
-    const result = await investigateIncident(req.params.id, userId);
+    const result = await investigateIncident(String(req.params.id), userId);
 
     const action = await prisma.agentAction.create({
       data: {
@@ -685,10 +806,10 @@ app.post("/incidents/:id/actions", async (req, res) => {
   res.json(action);
 });
 
-app.post("/actions/:id/approve", async (req, res) => {
+app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
   try {
     await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "approved" } });
-    const result = await performAction(req.params.id);
+    const result = await performAction(String(req.params.id));
     res.json({ approved: true, result });
   } catch (err) {
     console.error("[actions] approve failed:", err);
@@ -734,12 +855,24 @@ app.get("/chat/conversations/:id/messages", async (req, res) => {
   }
 });
 
-app.post("/chat/conversations/:id/messages", async (req, res) => {
+app.post("/chat/conversations/:id/messages", chatLimiter, async (req, res) => {
   try {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return; // response already sent (401)
 
-    const result = await sendMessage(req.params.id, req.body?.message ?? "", userId);
+    // When the user hits Stop, the browser aborts the request — but without
+    // this the server happily kept running the whole agent loop, burning
+    // tokens and a task quota on work nobody was waiting for.
+    const cancelled = new AbortController();
+    req.on("close", () => {
+      // A real AbortController, not a flag — this actually aborts the
+      // in-flight model call rather than letting it finish and discarding
+      // the result.
+      if (!res.writableEnded) cancelled.abort();
+    });
+
+    const result = await sendMessage(String(req.params.id), req.body?.message ?? "", userId, cancelled);
+    if (cancelled.signal.aborted) return; // client is gone; nothing to respond to
     res.json(result);
   } catch (err) {
     console.error("[chat] sendMessage failed:", err);
@@ -791,7 +924,7 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
   res.status(500).json({ error: err.message || "Internal server error" });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`API running on http://localhost:${PORT}`);
 
   // Print the settings that people most often expect to be on but aren't,
@@ -804,3 +937,30 @@ app.listen(PORT, () => {
   );
   initScheduler().catch((err) => console.error("[workflows] scheduler init failed:", err));
 });
+
+// Graceful shutdown. ECS sends SIGTERM before killing a task; without
+// handling it we leak Chromium processes and drop in-flight requests
+// mid-response on every single deploy.
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal} received — closing browsers and connections`);
+
+  // Stop accepting new connections, let in-flight requests finish.
+  server.close();
+
+  const { closeAllSessions } = await import("./tools/browser.js");
+  await Promise.race([
+    Promise.all([closeAllSessions(), prisma.$disconnect()]),
+    // Don't hang forever if something refuses to close — the orchestrator
+    // will SIGKILL us anyway, better to exit cleanly first.
+    new Promise((r) => setTimeout(r, 8000)),
+  ]);
+
+  console.log("[shutdown] done");
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

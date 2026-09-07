@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import { PrismaClient } from "@prisma/client";
+import { createNotification } from "./notifications.js";
 
 const prisma = new PrismaClient();
 
@@ -102,10 +103,34 @@ export async function reviewPendingPayment(id: string, decision: "approved" | "r
     where: { id },
     data: { status: decision, reviewedAt: new Date() },
   });
+
   if (decision === "approved") {
     await prisma.user.update({ where: { id: payment.userId }, data: { plan: "pro" } });
   }
+
+  // The user paid by bank transfer and then heard nothing — no email, no
+  // in-app message, no way to check. They'd assume it failed and either
+  // pay again or ask for a refund. Both outcomes are worse than an email.
+  await createNotification(
+    decision === "approved" ? "Payment confirmed — you're on Pro" : "We couldn't confirm your payment",
+    decision === "approved"
+      ? "Your bank transfer has been verified and your account is upgraded. Everything's unlocked now."
+      : "We couldn't match your receipt to a payment. Reply to this email with the transfer reference and we'll sort it out.",
+    { userId: payment.userId, link: "/billing" }
+  ).catch(() => {});
+
   return payment;
+}
+
+// Lets a user check their own submission instead of wondering whether it
+// went through. Scoped to their own payments only.
+export async function listMyPayments(userId: string) {
+  return prisma.pendingPayment.findMany({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    take: 10,
+    select: { id: true, amount: true, status: true, createdAt: true, reviewedAt: true, fileName: true },
+  });
 }
 
 // Every submitted receipt regardless of status — the pending-only list above

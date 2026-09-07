@@ -19,6 +19,36 @@ interface Workflow {
   lastRunAt: string | null;
 }
 
+// Real pipelines, prefilled. Nobody discovers multi-stage workflows from an
+// empty box — showing a working lead-gen example is how people realise what
+// this is actually for.
+const TEMPLATES = [
+  {
+    label: "Find local business leads",
+    name: "Local business leads",
+    prompt:
+      "Search Google Maps for plumbers in Manchester. For each result, collect the business name, phone, address, and whether they have a website. Add every one to a spreadsheet called 'leads' using appendToSheet. Skip any business already in the sheet — check with readSheet first.",
+    stages: [
+      "Read the 'leads' sheet. For each business that HAS a website, open it and note what's missing or weak — no mobile layout, no contact form, no SSL, outdated copyright, slow to load. Add a 'Website issues' column with your findings.",
+      "Read the 'leads' sheet again. For each business with no website OR with issues found, draft a short, specific outreach email — mention the actual problem you found, keep it under 120 words, no hard sell. Propose sending them and stop for my approval.",
+    ],
+  },
+  {
+    label: "Morning inbox triage",
+    name: "Inbox triage",
+    prompt:
+      "Open my inbox and read anything that arrived since yesterday. Summarise what genuinely needs a reply from me, ignoring newsletters and receipts.",
+    stages: ["For anything urgent, draft a reply and propose it for my approval. Don't send anything."],
+  },
+  {
+    label: "Track competitor pricing",
+    name: "Competitor pricing",
+    prompt:
+      "Open each competitor's pricing page, note every plan name and price, and add them to a spreadsheet called 'pricing' with today's date.",
+    stages: ["Compare today's rows against the previous ones in the sheet. If anything changed, tell me exactly what."],
+  },
+];
+
 const SCHEDULE_PRESETS = [
   { label: "Every 15 minutes", cron: "*/15 * * * *" },
   { label: "Hourly", cron: "0 * * * *" },
@@ -38,6 +68,7 @@ export default function WorkflowsPage() {
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [cronExpr, setCronExpr] = useState(SCHEDULE_PRESETS[1].cron);
+  const [stages, setStages] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
@@ -67,10 +98,11 @@ export default function WorkflowsPage() {
       await fetch(`${API_URL}/workflows`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...(await authHeaders()) },
-        body: JSON.stringify({ name, prompt, cron: cronExpr }),
+        body: JSON.stringify({ name, prompt, cron: cronExpr, stages: stages.filter((s) => s.trim()) }),
       });
       setName("");
       setPrompt("");
+      setStages([]);
       setCreating(false);
       await load();
     } finally {
@@ -124,10 +156,29 @@ export default function WorkflowsPage() {
 
         {creating && (
           <div className="p-4 rounded-lg border border-border mb-6 space-y-3">
+            <div>
+              <p className="text-xs text-muted-foreground mb-2">Start from a template:</p>
+              <div className="flex flex-wrap gap-2">
+                {TEMPLATES.map((t) => (
+                  <button
+                    key={t.label}
+                    onClick={() => {
+                      setName(t.name);
+                      setPrompt(t.prompt);
+                      setStages(t.stages);
+                    }}
+                    className="text-xs px-2.5 py-1.5 rounded-md border border-border text-muted-foreground hover:text-foreground hover:border-foreground/30 transition-colors"
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder="Name (e.g. Check LinkedIn messages)"
+              placeholder="Name (e.g. Find local business leads)"
               className="w-full text-sm rounded-md border bg-background px-3 py-2"
             />
             <textarea
@@ -137,6 +188,37 @@ export default function WorkflowsPage() {
               rows={3}
               className="w-full text-sm rounded-md border bg-background px-3 py-2 resize-none"
             />
+            {/* Each stage is a separate agent turn with its own full step
+                budget, which is what makes a real pipeline possible. */}
+            <div className="space-y-2">
+              {stages.map((s, i) => (
+                <div key={i} className="flex gap-2">
+                  <span className="text-[11px] text-muted-foreground/60 pt-2.5 w-10 shrink-0">
+                    then
+                  </span>
+                  <textarea
+                    value={s}
+                    onChange={(e) => setStages(stages.map((v, j) => (j === i ? e.target.value : v)))}
+                    rows={2}
+                    placeholder="What happens next?"
+                    className="flex-1 text-sm rounded-md border bg-background px-3 py-2 resize-none"
+                  />
+                  <button
+                    onClick={() => setStages(stages.filter((_, j) => j !== i))}
+                    className="text-muted-foreground hover:text-destructive px-1"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+              <button
+                onClick={() => setStages([...stages, ""])}
+                className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1.5"
+              >
+                <Plus className="h-3 w-3" /> Add another step
+              </button>
+            </div>
+
             <select
               value={cronExpr}
               onChange={(e) => setCronExpr(e.target.value)}

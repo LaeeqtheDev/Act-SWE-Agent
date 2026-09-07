@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { Bell } from "lucide-react";
 import { isHostedMode } from "@/lib/hosted-mode";
@@ -30,20 +30,28 @@ export function NotificationBell({ apiUrl = API_URL, getToken }: { apiUrl?: stri
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, [getToken]);
 
+  // If the API is down, polling every 30s produces a failed request every
+  // 30s forever. Back off after repeated failures instead of generating an
+  // endless stream of console noise nobody can act on.
+  const failuresRef = useRef(0);
+
   const load = useCallback(async () => {
     // In hosted mode the endpoint requires auth, so calling it before the
-    // Clerk token has arrived produces a guaranteed 401 — and polling every
-    // 30s turned that into a steady stream of unhandled rejections. Wait
-    // for the token first.
+    // Clerk token has arrived is a guaranteed 401.
     if (isHostedMode() && typeof getToken !== "function") return;
+    if (failuresRef.current >= 3) return; // API unreachable — stop hammering it
+
     try {
       const res = await fetch(`${apiUrl}/notifications`, { headers: await authHeaders() });
       if (!res.ok) return; // 401 before sign-in is expected, not an error worth surfacing
       const data = await res.json();
+      failuresRef.current = 0;
       setItems(Array.isArray(data.notifications) ? data.notifications : []);
       setUnread(typeof data.unread === "number" ? data.unread : 0);
     } catch {
-      // quiet failure — a notification bell shouldn't be able to break the page
+      // Network-level failure (API not running). Quiet by design — a
+      // notification bell should never be able to break the page.
+      failuresRef.current += 1;
     }
   }, [apiUrl, authHeaders, getToken]);
 
@@ -54,8 +62,14 @@ export function NotificationBell({ apiUrl = API_URL, getToken }: { apiUrl?: stri
   }, [load]);
 
   async function openAndMarkRead(id: string) {
-    await fetch(`${apiUrl}/notifications/${id}/read`, { method: "POST", headers: await authHeaders() });
-    load();
+    // Was completely uncaught — if the API was unreachable this threw an
+    // unhandled rejection straight into the console on every click.
+    try {
+      await fetch(`${apiUrl}/notifications/${id}/read`, { method: "POST", headers: await authHeaders() });
+      load();
+    } catch {
+      // ignore — marking read is not worth surfacing an error for
+    }
   }
 
   async function markAllRead() {

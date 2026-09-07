@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
-import { MessageSquare, LayoutDashboard, Workflow, CreditCard, UserCog } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Workflow, CreditCard, UserCog, Plug } from "lucide-react";
 import { isHostedMode } from "@/lib/hosted-mode";
 import { NotificationBell } from "@/components/agent/notification-bell";
 
@@ -16,6 +16,7 @@ const LINKS = [
   { href: "/agent", label: "Chat", icon: MessageSquare },
   { href: "/dashboard", label: "Activity", icon: LayoutDashboard },
   { href: "/workflows", label: "Workflows", icon: Workflow },
+  { href: "/settings/connections", label: "Connections", icon: Plug },
   { href: "/profile", label: "Profile", icon: UserCog },
   { href: "/billing", label: "Billing", icon: CreditCard, hostedOnly: true },
 ];

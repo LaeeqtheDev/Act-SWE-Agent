@@ -16,7 +16,7 @@ export function createOpenAICompatibleProvider(opts: {
   return {
     name: opts.providerName,
     model: opts.model,
-    async runTurn({ system, tools, history }) {
+    async runTurn({ system, tools, history, signal }) {
       const openaiTools: OpenAI.Chat.ChatCompletionTool[] = tools.map((t) => ({
         type: "function",
         function: { name: t.name, description: t.description, parameters: t.inputSchema },
@@ -55,11 +55,14 @@ export function createOpenAICompatibleProvider(opts: {
       // fast rather than hanging for minutes.
       const callWithRateLimitRetry = async (msgs: typeof messages, attempt = 0): Promise<OpenAI.Chat.ChatCompletion> => {
         try {
-          return await client.chat.completions.create({
-            model: opts.model,
-            messages: msgs,
-            tools: openaiTools.length > 0 ? openaiTools : undefined,
-          });
+          return await client.chat.completions.create(
+            {
+              model: opts.model,
+              messages: msgs,
+              tools: openaiTools.length > 0 ? openaiTools : undefined,
+            },
+            { signal }
+          );
         } catch (err) {
           const status = (err as { status?: number })?.status;
           if (status !== 429 || attempt >= 2) throw err;

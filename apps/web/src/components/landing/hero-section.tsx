@@ -1,11 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowRight, GitFork, ShieldCheck, KeyRound } from "lucide-react";
+import { ArrowRight, Sparkles, ShieldCheck, KeyRound } from "lucide-react";
 import { FlowField } from "./flow-field";
 import { SignalLine } from "./signal-line";
 import { Reveal } from "./reveal";
-import { TerminalDemo } from "./terminal-demo";
+import { TaskPreview } from "./task-preview";
 
 const REPO_URL = "https://github.com/LaeeqtheDev/Act-SWE-Agent";
 
@@ -17,25 +17,24 @@ export function HeroSection() {
         <div className="grid lg:grid-cols-[1.15fr_1fr] gap-12 lg:gap-16 items-center">
           <div>
             <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-5">
-              Open source · bring your own model
+              Your own AI assistant that actually does things
             </p>
             <h1 style={{ fontFamily: "var(--font-mono)" }} className="text-4xl md:text-[3.4rem] leading-[1.05] font-medium text-foreground">
-              It doesn&apos;t explain.
+              Give it a task.
               <br />
-              It does the work.
+              Watch it get done.
             </h1>
             <p className="mt-6 text-base md:text-lg text-muted-foreground max-w-lg leading-relaxed">
-              An AI agent that opens a real browser, signed into your real accounts. Ask it to
-              find a job and apply — it reads the listings, fills the form with your details, and
-              shows you everything before a single thing is submitted. Any model, your key,
-              free to self-host forever.
+              An AI assistant that opens a real browser and actually does things — applies to jobs,
+              clears your inbox, researches and writes it up, books what you need. You watch it work,
+              and nothing gets sent without your say-so.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <Link href="/agent" className="inline-flex items-center gap-2 px-5 py-3 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity">
-                Chat with the agent <ArrowRight className="h-4 w-4" />
+                Try it free <ArrowRight className="h-4 w-4" />
               </Link>
-              <a href={REPO_URL} target="_blank" rel="noreferrer" className="inline-flex items-center gap-2 px-5 py-3 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
-                <GitFork className="h-4 w-4" /> Fork it
+              <a href="#how-it-works" className="inline-flex items-center gap-2 px-5 py-3 rounded-md border border-border text-foreground hover:bg-muted/50 transition-colors">
+                See how it works
               </a>
             </div>
 
@@ -50,13 +49,13 @@ export function HeroSection() {
                 <KeyRound className="h-3.5 w-3.5 text-warn" /> No passwords handed over
               </span>
               <span className="inline-flex items-center gap-1.5">
-                <GitFork className="h-3.5 w-3.5 text-warn" /> MIT — self-host free
+                <Sparkles className="h-3.5 w-3.5 text-warn" /> Free to start, no card
               </span>
             </div>
           </div>
 
           <Reveal delay={0.15}>
-            <TerminalDemo />
+            <TaskPreview />
           </Reveal>
         </div>
 

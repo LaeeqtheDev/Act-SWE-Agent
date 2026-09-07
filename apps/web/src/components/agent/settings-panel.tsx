@@ -8,6 +8,19 @@ import { Check, Eye, EyeOff, Loader2 } from "lucide-react";
 
 const PROVIDERS = ["groq", "anthropic", "openai", "grok", "ollama"];
 
+const MODEL_NOTES: Record<string, string> = {
+  "openai/gpt-oss-120b": "Recommended — best reasoning, finishes tasks in fewer steps",
+  "qwen/qwen3-32b": "Strong at tool use, good middle ground",
+  "llama-3.3-70b-versatile": "Reliable all-rounder",
+  "meta-llama/llama-4-scout-17b-16e-instruct": "Fast, large context",
+  "openai/gpt-oss-20b": "Fastest, but struggles with multi-step tasks",
+  "llama-3.1-8b-instant": "Fastest — simple questions only",
+  "groq/compound": "Has its own built-in web search",
+  "groq/compound-mini": "Lighter version of Compound",
+  "claude-sonnet-4-5": "Recommended — excellent at multi-step work",
+  "gpt-4o": "Recommended — strong general reasoning",
+};
+
 const KEY_SOURCES: Record<string, { url: string; label: string; note?: string }> = {
   groq: { url: "https://console.groq.com/keys", label: "console.groq.com/keys", note: "Free tier, no card required." },
   anthropic: { url: "https://console.anthropic.com/settings/keys", label: "console.anthropic.com" },
@@ -33,6 +46,7 @@ interface Settings {
 }
 
 export function SettingsPanel({
+  onSaved,
   apiUrl,
   open,
   onOpenChange,
@@ -42,6 +56,7 @@ export function SettingsPanel({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   getToken?: () => Promise<string | null>;
+  onSaved?: (providerModel: string) => void;
 }) {
   const [catalog, setCatalog] = useState<Catalog>({});
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -96,6 +111,10 @@ export function SettingsPanel({
       setSettings(data.settings);
       setApiKey("");
       setSaved(true);
+      // Tell the composer immediately — waiting for the dialog to close and
+      // re-fetching /ai/status separately meant the chip could show the OLD
+      // model right after a successful save, or race the write entirely.
+      onSaved?.(`${provider}/${model}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reach the API.");
     } finally {
@@ -146,7 +165,12 @@ export function SettingsPanel({
 
           {models.length > 0 && (
             <div>
-              <label className="text-xs text-muted-foreground mb-1.5 block">Model</label>
+              <label className="text-xs text-muted-foreground mb-1.5 block">
+                Model
+                <span className="ml-2 text-muted-foreground/60">
+                  bigger models often finish faster — fewer wasted steps
+                </span>
+              </label>
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
@@ -155,6 +179,7 @@ export function SettingsPanel({
                 {models.map((m) => (
                   <option key={m} value={m}>
                     {m}
+                    {MODEL_NOTES[m] ? ` — ${MODEL_NOTES[m]}` : ""}
                   </option>
                 ))}
               </select>

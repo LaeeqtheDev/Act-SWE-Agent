@@ -36,5 +36,13 @@ export interface AgentTurn {
 export interface AIProvider {
   readonly name: string;
   readonly model: string;
-  runTurn(opts: { system: string; tools: ToolDef[]; history: AgentMessage[] }): Promise<AgentTurn>;
+  runTurn(opts: {
+    system: string;
+    tools: ToolDef[];
+    history: AgentMessage[];
+    /** Aborts the in-flight HTTP request when the user cancels. Without
+     * this a cancelled turn still runs to completion server-side and we
+     * just discard the result afterwards. */
+    signal?: AbortSignal;
+  }): Promise<AgentTurn>;
 }

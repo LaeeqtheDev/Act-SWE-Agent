@@ -36,6 +36,9 @@ export default function BillingPage() {
   const [uploaded, setUploaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [bank, setBank] = useState<BankDetails | null>(null);
+  const [myPayments, setMyPayments] = useState<
+    { id: string; amount: string | null; status: string; createdAt: string; reviewedAt: string | null }[]
+  >([]);
   const [usage, setUsage] = useState<Usage | null>(null);
 
   useEffect(() => {
@@ -55,6 +58,12 @@ export default function BillingPage() {
     (async () => {
       const res = await fetch(`${API_URL}/usage`, { headers: await authHeaders() });
       if (res.ok) setUsage(await res.json());
+
+      const pay = await fetch(`${API_URL}/billing/my-payments`, { headers: await authHeaders() });
+      if (pay.ok) {
+        const data = await pay.json();
+        setMyPayments(Array.isArray(data) ? data : []);
+      }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getToken]);
@@ -142,7 +151,8 @@ export default function BillingPage() {
 
         <h1 className="text-2xl font-semibold text-foreground mb-2">Billing</h1>
         <p className="text-sm text-muted-foreground mb-6">
-          500 tasks/month and access to premium models on Pro. $30/month, cancel anytime.
+          2,000 steps a month and smarter models on Pro. $30/month, cancel anytime. Using your own AI
+          key removes limits entirely on any plan.
         </p>
 
         {usage?.hosted && usage.plan !== "pro" && (
@@ -150,8 +160,11 @@ export default function BillingPage() {
             <div>
               <p className="text-sm text-foreground font-medium">You&apos;re on the Free plan</p>
               <p className="text-xs text-muted-foreground mt-0.5">
-                {usage.tasksUsed}/{usage.limit} tasks used this period. Upgrade below for 500/month
-                and premium models.
+                {usage.tasksUsed} of {usage.limit} steps used this period.
+              </p>
+              <p className="text-xs text-muted-foreground/70 mt-1.5 max-w-sm">
+                A step is one thing the agent does — reading a page, running a search, filling a form.
+                A quick question is 1&ndash;2; a full job application is around 8&ndash;12.
               </p>
             </div>
           </div>
@@ -167,10 +180,20 @@ export default function BillingPage() {
                 </p>
               ) : (
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  {usage.tasksUsed}/{usage.limit} tasks used this period
+                  {usage.tasksUsed} of {usage.limit} steps used this period
                 </p>
               )}
             </div>
+            {usage?.limit ? (
+              <div className="w-32 shrink-0 mr-4">
+                <div className="h-1.5 rounded-full bg-muted overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-warn transition-all"
+                    style={{ width: `${Math.min(100, ((usage.tasksUsed ?? 0) / usage.limit) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
             {!cancelled && (
               <button
                 onClick={cancelPlan}
@@ -278,6 +301,36 @@ export default function BillingPage() {
             )}
           </div>
         </div>
+
+        {myPayments.length > 0 && (
+          <div className="mt-10">
+            <p className="text-sm font-medium text-foreground mb-3">Your bank transfers</p>
+            <div className="space-y-2">
+              {myPayments.map((p) => (
+                <div key={p.id} className="flex items-center justify-between gap-4 p-3 rounded-lg border border-border text-sm">
+                  <div>
+                    <p className="text-foreground">{p.amount || "Receipt submitted"}</p>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Sent {new Date(p.createdAt).toLocaleDateString()}
+                      {p.reviewedAt && ` · Reviewed ${new Date(p.reviewedAt).toLocaleDateString()}`}
+                    </p>
+                  </div>
+                  <span
+                    className={`text-xs px-2 py-1 rounded-md capitalize ${
+                      p.status === "approved"
+                        ? "bg-warn/15 text-warn"
+                        : p.status === "rejected"
+                        ? "bg-destructive/15 text-destructive"
+                        : "bg-muted text-muted-foreground"
+                    }`}
+                  >
+                    {p.status === "pending" ? "Awaiting review" : p.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         <p className="text-xs text-muted-foreground mt-8">
           Prefer to keep using your own API key instead? Premium models are available to anyone

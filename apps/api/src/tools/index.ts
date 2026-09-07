@@ -1,10 +1,18 @@
 import { PrismaClient } from "@prisma/client";
 import type { ToolDef, AgentMessage } from "../providers/index.js";
 import { getPodStatus, getRecentEvents as getK8sEvents } from "../k8s.js";
-import { browseWeb, clickToNavigate } from "./browser.js";
+import { browseWeb, clickToNavigate, scrollPage, goBack, readPageAsMarkdown, pressKey, typeInto, waitForElement, verifyPageContains } from "./browser.js";
 import { webSearch } from "./search.js";
-import { readProjectFile, listProjectDirectory, openInEditor } from "./devtools.js";
+import { readProjectFile, listProjectDirectory, openInEditor, searchProjectFiles } from "./devtools.js";
 import { compactHistoryForRequest } from "../lib/history.js";
+import { appendToSheet, readSheet, listSheets } from "./spreadsheet.js";
+import {
+  listSlackChannels,
+  readSlackChannel,
+  searchSlack,
+  searchNotion,
+  readNotionPage,
+} from "./integrations.js";
 import { getUserProfile } from "../profile.js";
 
 const prisma = new PrismaClient();
@@ -89,7 +97,7 @@ const baseTools: ToolDef[] = [
   {
     name: "browseWeb",
     description:
-      "Open a URL in a real browser and read its text content, plus a list of clickable/fillable elements on the page (each with a ready-to-use selector). Links in that list also include their resolved href — for plain navigation (opening a link, going to a different page/section), just call browseWeb on that href directly instead of proposing a browser_action click; it's the same destination either way, and only actions that actually submit, send, or change something need an approval. If CHROME_USER_DATA_DIR is configured, this uses the user's own already-logged-in local Chrome profile — Gmail (mail.google.com), Calendar (calendar.google.com), Docs (docs.google.com), LinkedIn (linkedin.com), Slack (app.slack.com) all work this way, using whatever the user is already signed into in that browser. Without it, this is a logged-out headless browser, fine only for public pages.",
+      "Open a URL, read its text, and get clickable elements with selectors and hrefs. Uses your logged-in Chrome (Gmail, Calendar, Docs, LinkedIn, Slack) if CHROME_USER_DATA_DIR is set; otherwise a logged-out browser.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string" } },
@@ -99,11 +107,75 @@ const baseTools: ToolDef[] = [
   {
     name: "clickToNavigate",
     description:
-      "Click a button/tab/control that only NAVIGATES or reveals content — an 'Open roles' button, a tab, 'next page', 'show more', expanding a listing. Returns the resulting page's text and interactiveElements so you can keep working immediately. Use this instead of proposeAction for anything that just moves you around or reveals information: it needs no approval because it changes nothing. Only use proposeAction when something is actually submitted, sent, posted, or applied.",
+      "Click a button, tab, or link that only navigates or reveals content (no href to browseWeb directly to). Returns the new page's text and elements.",
     inputSchema: {
       type: "object",
       properties: { selector: { type: "string", description: "A selector from a prior browseWeb/clickToNavigate interactiveElements list." } },
       required: ["selector"],
+    },
+  },
+  {
+    name: "typeInto",
+    description:
+      "Type text into a field — a search box, a filter, a message box. No approval needed: typing changes nothing on its own, it's the submit that matters. Follow with pressKey('Enter') or clickToNavigate on the submit button. Refuses password and payment fields, which must go through proposeAction instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        selector: { type: "string", description: "A selector from interactiveElements." },
+        text: { type: "string" },
+      },
+      required: ["selector", "text"],
+    },
+  },
+  {
+    name: "verifyPageContains",
+    description:
+      "Check whether text is actually present on the page right now. Use this AFTER doing something — typing, submitting, clicking — to confirm it worked before telling the user it did. Never claim a task succeeded without verifying it.",
+    inputSchema: {
+      type: "object",
+      properties: { text: { type: "string", description: "Text you expect to find." } },
+      required: ["text"],
+    },
+  },
+  {
+    name: "waitForElement",
+    description:
+      "Wait for an element to appear before acting on it. Use when a page loads content dynamically and a click just failed — it's usually a timing problem, not a missing element.",
+    inputSchema: {
+      type: "object",
+      properties: { selector: { type: "string" } },
+      required: ["selector"],
+    },
+  },
+  {
+    name: "scrollPage",
+    description:
+      "Scroll the current page and get back what's newly visible. Most feeds, job boards, and search results lazy-load — content below the fold does not exist in the page until you scroll. If a page looks short or you need more results, scroll before concluding there aren't any.",
+    inputSchema: {
+      type: "object",
+      properties: { direction: { type: "string", enum: ["down", "up", "bottom", "top"] } },
+    },
+  },
+  {
+    name: "goBack",
+    description:
+      "Go back to the previous page — the way a person recovers from opening the wrong result. Much cheaper than re-running a search to get back to a results list.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "readPageAsMarkdown",
+    description:
+      "Read the current page as structured markdown, preserving headings, lists, and tables. Use this for documents, articles, and long job descriptions where structure matters — plain text loses which heading a paragraph belongs to.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "pressKey",
+    description:
+      "Press a keyboard key on the current page — 'Enter' to submit a search box, 'Escape' to dismiss a dialog, 'Tab' to move between fields, 'PageDown' to scroll. Use after filling a search field when there's no visible submit button.",
+    inputSchema: {
+      type: "object",
+      properties: { key: { type: "string", description: "e.g. Enter, Escape, Tab, ArrowDown, PageDown" } },
+      required: ["key"],
     },
   },
   {
@@ -119,7 +191,7 @@ const baseTools: ToolDef[] = [
     inputSchema: {
       type: "object",
       properties: {
-        type: { type: "string", enum: ["restart_pod", "rollback", "browser_action", "form_fill", "file_edit", "shell_command"] },
+        type: { type: "string", enum: ["restart_pod", "rollback", "browser_action", "form_fill", "file_edit", "shell_command", "slack_message", "notion_append"] },
         summary: { type: "string", description: "One sentence explaining what this action does and why." },
         serviceName: { type: "string", description: "Required for restart_pod / rollback." },
         browserPayload: {
@@ -148,6 +220,16 @@ const baseTools: ToolDef[] = [
             submitSelector: { type: "string", description: "Optional — the submit/apply button to click after filling." },
           },
         },
+        slackPayload: {
+          type: "object",
+          description: "Required when type is slack_message.",
+          properties: { channel: { type: "string" }, text: { type: "string" } },
+        },
+        notionPayload: {
+          type: "object",
+          description: "Required when type is notion_append.",
+          properties: { pageId: { type: "string" }, text: { type: "string" } },
+        },
         filePayload: {
           type: "object",
           description: "Required only when type is file_edit. Path is relative to the project root.",
@@ -161,6 +243,38 @@ const baseTools: ToolDef[] = [
       },
       required: ["type", "summary"],
     },
+  },
+  {
+    name: "appendToSheet",
+    description:
+      "Add rows to a spreadsheet (.xlsx), creating it if needed. Rows ACCUMULATE across runs, so a scheduled workflow builds one growing sheet rather than a new file each time. Use this for lead lists, research results, anything tabular. Pass rows as objects — the keys become columns.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sheetName: { type: "string", description: "e.g. 'plumber-leads'. Reused to append to the same sheet." },
+        rows: {
+          type: "array",
+          description: 'e.g. [{"Business":"Joes Cafe","Website":"none","Phone":"555-0100"}]',
+          items: { type: "object" },
+        },
+      },
+      required: ["sheetName", "rows"],
+    },
+  },
+  {
+    name: "readSheet",
+    description:
+      "Read back a spreadsheet you've built. Use this to check what's already in there before adding more — avoids duplicating businesses you've already found, and lets a later workflow stage work through rows collected earlier.",
+    inputSchema: {
+      type: "object",
+      properties: { sheetName: { type: "string" } },
+      required: ["sheetName"],
+    },
+  },
+  {
+    name: "listSheets",
+    description: "List the spreadsheets that exist.",
+    inputSchema: { type: "object", properties: {} },
   },
   {
     name: "createDocument",
@@ -200,6 +314,16 @@ const localDevTools: ToolDef[] = [
     },
   },
   {
+    name: "searchProjectFiles",
+    description:
+      "Search the codebase for text — a function name, a string, a config key. Returns file paths with line numbers. This is how you find where something lives; don't guess at file paths one at a time.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+  {
     name: "openInEditor",
     description: "Open a file or the whole project in the user's local VS Code.",
     inputSchema: {
@@ -209,7 +333,77 @@ const localDevTools: ToolDef[] = [
   },
 ];
 
+const integrationTools: ToolDef[] = [
+  {
+    name: "listSlackChannels",
+    description: "List the Slack channels you can access. Use this first if you need a channel ID.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "readSlackChannel",
+    description:
+      "Read recent messages from a Slack channel, with sender names resolved. Accepts '#general' or a channel ID. Far faster than opening Slack in the browser.",
+    inputSchema: {
+      type: "object",
+      properties: { channel: { type: "string" }, limit: { type: "number", description: "default 20, max 50" } },
+      required: ["channel"],
+    },
+  },
+  {
+    name: "searchSlack",
+    description: "Search Slack messages across the workspace.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+  {
+    name: "searchNotion",
+    description:
+      "Search Notion pages and databases. Only pages shared with the integration during setup are visible — if something's missing, that's why.",
+    inputSchema: {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    },
+  },
+  {
+    name: "readNotionPage",
+    description: "Read a Notion page's content as text. Get the page ID from searchNotion first.",
+    inputSchema: {
+      type: "object",
+      properties: { pageId: { type: "string" } },
+      required: ["pageId"],
+    },
+  },
+];
+
+const INFRA_TOOL_NAMES = new Set([
+  "getServiceHealth",
+  "getRecentErrors",
+  "listServices",
+  "listIncidents",
+  "getDeploymentHistory",
+  "getKubernetesPodStatus",
+  "getKubernetesEvents",
+]);
+
+// Which integrations are connected. Refreshed per task by chat.ts rather
+// than queried inside getTools, which is called synchronously mid-loop.
+let connectedServices = new Set<string>();
+
+export function setConnectedServices(services: string[]): void {
+  connectedServices = new Set(services);
+}
+
 export function getTools(): ToolDef[] {
+  // Drop the infra/monitoring tools unless this deployment actually runs
+  // them. They're dead weight for a browsing agent and their schemas are
+  // resent on every single turn.
+  const withInfra = process.env.ENABLE_INFRA_TOOLS === "true";
+  const core = withInfra ? baseTools : baseTools.filter((t) => !INFRA_TOOL_NAMES.has(t.name));
+
   // ENABLE_LOCAL_DEV_TOOLS is the single switch, hosted or not — you decide
   // whether the agent gets filesystem and shell access on YOUR server.
   //
@@ -220,7 +414,19 @@ export function getTools(): ToolDef[] {
   // propose shell commands on it. That's a legitimate choice for a
   // single-operator deployment, and a serious one for a public signup — so
   // it stays opt-in and off by default rather than silently enabled.
-  return process.env.ENABLE_LOCAL_DEV_TOOLS === "true" ? [...baseTools, ...localDevTools] : baseTools;
+  // Only offer Slack/Notion tools when they're actually connected —
+  // otherwise the model burns steps calling tools that can only ever
+  // return "not connected".
+  const withIntegrations = [
+    ...core,
+    ...integrationTools.filter((t) =>
+      t.name.toLowerCase().includes("slack") ? connectedServices.has("slack") : connectedServices.has("notion")
+    ),
+  ];
+
+  return process.env.ENABLE_LOCAL_DEV_TOOLS === "true"
+    ? [...withIntegrations, ...localDevTools]
+    : withIntegrations;
 }
 
 // Kept for anything importing the flat list directly.
@@ -235,9 +441,17 @@ export interface ToolContext {
   incidentId?: string; // present when the caller is investigating a specific incident
   conversationId?: string; // present when the caller is a chat conversation
   userId?: string; // present in hosted mode — scopes the user's saved profile
+  /** Aborted when the user presses Stop. Checked before any tool that
+   * launches a browser or makes a network call, so cancelling actually
+   * prevents work rather than just discarding its result. */
+  signal?: AbortSignal;
 }
 
 export async function runTool(name: string, input: Record<string, unknown>, ctx: ToolContext = {}) {
+  // Bail before doing anything expensive. Without this, a tool call that was
+  // already queued would still launch Chrome after the user hit Stop.
+  if (ctx.signal?.aborted) return { error: "Cancelled by user." };
+
   const serviceName = input.serviceName as string;
 
   switch (name) {
@@ -271,7 +485,7 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       return getK8sEvents(serviceName);
     case "webSearch":
       try {
-        return await webSearch(input.query as string);
+        return await webSearch(input.query as string, ctx.conversationId);
       } catch (err) {
         return { error: err instanceof Error ? err.message : "search failed" };
       }
@@ -283,6 +497,48 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
         return await clickToNavigate(input.selector as string, ctx.conversationId);
       } catch (err) {
         return { error: err instanceof Error ? err.message : "click failed" };
+      }
+    case "typeInto":
+      try {
+        return await typeInto(input.selector as string, input.text as string, ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "typing failed" };
+      }
+    case "verifyPageContains":
+      try {
+        return await verifyPageContains(input.text as string, ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "verify failed" };
+      }
+    case "waitForElement":
+      try {
+        return await waitForElement(input.selector as string, ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "wait failed" };
+      }
+    case "scrollPage":
+      try {
+        return await scrollPage((input.direction as "down" | "up" | "bottom" | "top") ?? "down", ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "scroll failed" };
+      }
+    case "goBack":
+      try {
+        return await goBack(ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "go back failed" };
+      }
+    case "readPageAsMarkdown":
+      try {
+        return await readPageAsMarkdown(ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "read failed" };
+      }
+    case "pressKey":
+      try {
+        return await pressKey(input.key as string, ctx.conversationId);
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : "key press failed" };
       }
     case "getUserProfile": {
       const profile = await getUserProfile(ctx.userId);
@@ -298,8 +554,26 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       return readProjectFile(input.path as string);
     case "listProjectDirectory":
       return listProjectDirectory((input.path as string) ?? ".");
+    case "searchProjectFiles":
+      return searchProjectFiles(input.query as string);
     case "openInEditor":
       return openInEditor((input.path as string) ?? ".");
+    case "listSlackChannels":
+      return listSlackChannels(ctx.userId);
+    case "readSlackChannel":
+      return readSlackChannel(input.channel as string, ctx.userId, (input.limit as number) ?? 20);
+    case "searchSlack":
+      return searchSlack(input.query as string, ctx.userId);
+    case "searchNotion":
+      return searchNotion(input.query as string, ctx.userId);
+    case "readNotionPage":
+      return readNotionPage(input.pageId as string, ctx.userId);
+    case "appendToSheet":
+      return appendToSheet(input.sheetName as string, input.rows as Record<string, string | number | null>[]);
+    case "readSheet":
+      return readSheet(input.sheetName as string);
+    case "listSheets":
+      return listSheets();
     case "createDocument": {
       const title = input.title as string;
       const content = input.content as string;
@@ -308,6 +582,7 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       const action = await prisma.agentAction.create({
         data: {
           incidentId: ctx.incidentId ?? null,
+          userId: ctx.userId ?? null,
           conversationId: ctx.conversationId ?? null,
           type: "file_edit",
           status: "pending",
@@ -336,10 +611,11 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
         }
       }
 
-      const payload = input.browserPayload ?? input.formPayload ?? input.filePayload ?? input.shellPayload;
+      const payload = input.browserPayload ?? input.formPayload ?? input.slackPayload ?? input.notionPayload ?? input.filePayload ?? input.shellPayload;
       const action = await prisma.agentAction.create({
         data: {
           incidentId,
+          userId: ctx.userId ?? null,
           conversationId: ctx.conversationId ?? null,
           type: (input.type as string) ?? "restart_pod",
           status: "pending",

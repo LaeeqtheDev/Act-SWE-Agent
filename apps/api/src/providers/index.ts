@@ -26,14 +26,21 @@ export const OPENAI_COMPATIBLE_PRESETS: Record<
   groq: {
     baseURL: "https://api.groq.com/openai/v1",
     envKey: "GROQ_API_KEY",
-    defaultModel: "openai/gpt-oss-20b",
+    // 120B by default, not 20B. On a browsing agent the bottleneck is
+    // reasoning quality, not tokens/sec — a model that picks the right
+    // selector first time finishes in 6 steps where a weaker one flails
+    // through 16. Fewer, better steps is faster in wall-clock terms AND
+    // cheaper, since every step resends the whole conversation.
+    defaultModel: "openai/gpt-oss-120b",
     models: [
-      "openai/gpt-oss-20b",
       "openai/gpt-oss-120b",
-      "llama-3.1-8b-instant",
+      "qwen/qwen3-32b",
       "llama-3.3-70b-versatile",
-      "groq/compound-mini",
+      "meta-llama/llama-4-scout-17b-16e-instruct",
+      "openai/gpt-oss-20b",
+      "llama-3.1-8b-instant",
       "groq/compound",
+      "groq/compound-mini",
     ],
   },
   ollama: {
@@ -51,6 +58,11 @@ export const ANTHROPIC_MODELS = ["claude-sonnet-4-5", "claude-opus-4-1", "claude
 // fast and capable); Pro unlocks the larger, more expensive ones. Self-hosted
 // and BYOK usage is never restricted by this at all — see index.ts, this
 // check only runs when HOSTED_MODE is true.
+// gpt-oss-120b was on this list from before it became the free Groq
+// default — a direct contradiction that silently 403'd anyone on the free
+// plan who tried to select it, and the UI had no way to explain that, so
+// the dropdown just looked like it wasn't saving. Groq's whole catalog is
+// free-tier by design, so none of it belongs on a "premium" list.
 const PREMIUM_MODELS = new Set([
   "claude-sonnet-4-5",
   "claude-opus-4-1",
@@ -58,8 +70,6 @@ const PREMIUM_MODELS = new Set([
   "gpt-4.1",
   "o3-mini",
   "grok-2-latest",
-  "openai/gpt-oss-120b",
-  "groq/compound",
 ]);
 
 export function isPremiumModel(model: string): boolean {

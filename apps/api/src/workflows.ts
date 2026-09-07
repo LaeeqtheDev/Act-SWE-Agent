@@ -29,7 +29,21 @@ export async function runWorkflowNow(workflowId: string): Promise<void> {
       await prisma.workflow.update({ where: { id: workflow.id }, data: { conversationId } });
     }
 
-    const result = await sendMessage(conversationId, workflow.prompt, workflow.userId ?? undefined);
+    // Run the main prompt, then each additional stage in order. Each stage
+    // is a separate agent turn with its own full step budget — the reason a
+    // pipeline like "find businesses → check their websites → email them"
+    // couldn't work before is that all three had to fit in one turn, and it
+    // ran out of steps around stage two.
+    //
+    // They share one conversation, so stage 2 can see what stage 1 found
+    // without anything being passed explicitly.
+    const stages = Array.isArray(workflow.stages) ? (workflow.stages as string[]) : [];
+    let result = await sendMessage(conversationId, workflow.prompt, workflow.userId ?? undefined);
+
+    for (const stage of stages) {
+      if (typeof stage !== "string" || !stage.trim()) continue;
+      result = await sendMessage(conversationId, stage, workflow.userId ?? undefined);
+    }
 
     await prisma.workflowRun.update({
       where: { id: run.id },
@@ -113,11 +127,19 @@ export async function listWorkflows(userId?: string) {
   });
 }
 
-export async function createWorkflow(opts: { name: string; prompt: string; cron: string; notifyOnRun?: boolean; userId?: string }) {
+export async function createWorkflow(opts: {
+  name: string;
+  prompt: string;
+  cron: string;
+  stages?: string[];
+  notifyOnRun?: boolean;
+  userId?: string;
+}) {
   const workflow = await prisma.workflow.create({
     data: {
       name: opts.name,
       prompt: opts.prompt,
+      stages: opts.stages && opts.stages.length > 0 ? opts.stages : undefined,
       cron: opts.cron,
       notifyOnRun: opts.notifyOnRun ?? true,
       userId: opts.userId,
@@ -127,7 +149,7 @@ export async function createWorkflow(opts: { name: string; prompt: string; cron:
   return workflow;
 }
 
-export async function updateWorkflow(id: string, opts: Partial<{ name: string; prompt: string; cron: string; enabled: boolean; notifyOnRun: boolean }>) {
+export async function updateWorkflow(id: string, opts: Partial<{ name: string; prompt: string; cron: string; enabled: boolean; notifyOnRun: boolean; stages: string[] }>) {
   const workflow = await prisma.workflow.update({ where: { id }, data: opts });
   scheduleWorkflow(workflow);
   return workflow;

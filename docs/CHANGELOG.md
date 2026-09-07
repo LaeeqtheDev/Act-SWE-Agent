@@ -1643,3 +1643,818 @@ their own suffixed directories — isolated, but starting logged out.
    act, it no longer had the selectors. Raised to 200 chars with the last
    two results kept intact, which is enough for "browse a page, then click
    something on it" to work.
+
+---
+
+## 46. Why clicks silently failed
+
+**Root cause: truncated selectors could never match.** Element labels are cut
+to 60 chars to keep payloads small, then used to build
+`role=link[name="<truncated>"]` — but role-name matching is **exact**. A
+truncated name matches nothing, so every click on an element with a long
+label failed silently. YouTube video titles, job listings, article headlines
+— all of them.
+
+That's the whole `clickToNavigate clickToNavigate ... clickToNavigate` trace
+ending with nothing played. It wasn't confused; it was firing selectors that
+could not possibly resolve.
+
+Now uses a case-insensitive substring regex on the first 40 characters, with
+regex metacharacters escaped (verified against a real YouTube title
+containing `|`, which would otherwise have produced an invalid pattern).
+
+**Failed clicks returned nothing useful.** Just "click failed" — no
+indication of what *was* clickable, so the agent retried variations of the
+same broken selector until it ran out of turns. Failures now return the
+page's current `interactiveElements` and the current URL, so it can pick
+something real.
+
+**Prefer href over clicking.** If an element has an href, browsing straight
+to it is faster and far more reliable than clicking through a results page —
+a YouTube watch URL just plays. `clickToNavigate` is now positioned as the
+fallback for JS-driven controls with no href.
+
+---
+
+## 47. Cancel actually cancels; chat isn't a task
+
+**Stop only stopped the browser.** The client aborted its request, but the
+server kept running the entire agent loop — still calling the model, still
+burning tokens and a task quota on work nobody was waiting for. The request
+now signals cancellation on disconnect, and the loop checks between turns
+and between tool calls, so it stops at the next boundary.
+
+**"thank you it worked" burned a task and fired tools.** Two fixes, because
+a prompt instruction alone isn't reliable on a small model:
+- The prompt now says plainly that acknowledgements are just talk.
+- More importantly, `isPleasantry()` detects them in code: no task charged,
+  and **no tools passed to the model at all** — it literally cannot fire one
+  rather than being asked not to.
+
+Writing tests for that classifier immediately caught two real false
+positives — "great, now open youtube and play it" and "no, use the other one
+instead" were both being treated as small talk, which would have silently
+stripped the agent's tools from genuine requests. The pattern is now
+anchored to the whole message, so anything following the pleasantry means
+it's a request. That's the safe direction to err in: charging a task for a
+chatty message is a much smaller cost than breaking a real one.
+
+25 tests passing (was 23).
+
+---
+
+## 48. Cancel actually aborts; a real visible cursor
+
+**Cancel didn't stop work in flight.** The previous fix checked a boolean
+flag between turns — but an in-flight model call or page load ran to
+completion regardless; we just discarded the result afterwards. That's why
+cancelling mid-task appeared to keep going: it genuinely was.
+
+Now a real `AbortController` threaded through `sendMessage` → the agent loop
+→ `provider.runTurn` → the underlying HTTP call. Added `signal` to the
+`AIProvider` interface and wired it into both the OpenAI-compatible and
+Anthropic providers, so pressing Stop aborts the request immediately rather
+than at the next checkpoint. An abort is treated as a clean stop, not an
+error to log.
+
+**The cursor was invisible for a real reason.** The overlay only moved on
+`mousemove`, and started at (0,0) — so until the first move event landed it
+sat off in the corner. Replaced with:
+- An actual pointer-arrow SVG (a floating dot doesn't read as "something is
+  using this computer")
+- Positioned centre-screen on injection, so it's visible immediately
+- A click pulse ring, so the moment of clicking is obvious
+- Movement that scales steps to distance — a short hop no longer takes as
+  long as crossing the page, which is part of why it felt sluggish
+- Per-page position tracking, so movement starts from where the mouse
+  actually is rather than an unknown origin
+
+Each conversation already had its own browser session (#45), so with
+multiple tasks running you get one visible cursor per window.
+
+**Notification bell noise.** `openAndMarkRead` had no error handling at all —
+an unreachable API threw an unhandled rejection on every click. Polling also
+now backs off after three consecutive failures instead of generating a
+failed request every 30 seconds forever.
+
+---
+
+## 49. Why the mouse looked frozen, and real speed work
+
+**The mouse bug had an obvious cause once found.** `slowMo: 120` delays
+EVERY Playwright operation — including each of the 25 interpolated mouse
+steps. So a single mouse move took ~3 seconds, and because each step was
+separated by a blocking delay it read as teleporting between frozen
+positions rather than moving. It was simultaneously the reason things were
+slow AND the reason movement wasn't visible.
+
+Removed `slowMo` entirely and replaced it with explicit pacing inside
+`moveTo()`: a manual walk along the path with a 14ms step delay and an
+ease-out cubic curve. ~600px in about a third of a second — genuinely
+visible, and roughly 10x faster than before.
+
+Also cut: SPA settle wait 600ms → 250ms, typing delay 20-35ms → 12ms.
+
+**Read-only tools now run in parallel.** Three web searches took three times
+as long as one for no reason. Tools that only read (`webSearch`, service
+health, profile, project files) now run concurrently; anything that drives
+the shared browser page stays strictly sequential, since two clicks at once
+would fight over the same tab. Added a test that fails loudly if a stateful
+tool is ever added to the parallel-safe list.
+
+**Five new capabilities**, each closing a gap that genuinely blocked tasks:
+- `scrollPage` — feeds, job boards and search results lazy-load, so content
+  below the fold *does not exist* in the page until you scroll. The agent
+  was seeing one screenful and concluding that was everything.
+- `goBack` — recover from opening the wrong result without re-running the
+  entire search.
+- `readPageAsMarkdown` — preserves headings, lists and tables, so long job
+  descriptions and documents keep the structure that tells you which
+  requirement sits under which section.
+- `pressKey` — Enter to submit a search box with no visible button, Escape
+  to dismiss a dialog, Tab between fields.
+- `screenshotPage` — for pages where text extraction returns nothing useful.
+
+The prompt now tells the agent to scroll before concluding there are no more
+results, and to batch independent reads into one turn instead of one per
+turn.
+
+27 tests passing (was 25).
+
+---
+
+## 50. Cancel reaching the tools, and why no mouse was visible
+
+**Cancel didn't reach the tools.** The abort signal was threaded into the
+provider call, but `runTool` never received it — so a tool call that was
+already queued would still launch Chrome after Stop was pressed. That's the
+"it opened Chrome again and again." Now `runTool` checks the signal before
+doing anything, and cancelling closes that conversation's browser window
+instead of leaving it open.
+
+**Why there was no visible mouse — a real gap, not a config problem.**
+`moveTo()` was only ever called from form filling and approved click
+actions. A task that searches and browses — which is most tasks — never
+touched it. There was genuinely nothing to watch.
+
+Two fixes:
+- `webSearch` had its own always-headless browser, so search-only tasks
+  opened no visible window at all. It now uses the shared visible session.
+- `browseWeb` now sweeps the cursor across the page after each load, so any
+  browsing shows movement rather than only clicks.
+
+Also added a per-launch log so this is diagnosable from the terminal:
+```
+[browser] launched session "abc123" — visible: YES, profile: yours
+```
+If that says `NO`, `BROWSER_HEADLESS="false"` isn't set in `apps/api/.env`.
+
+---
+
+## 51. Chrome launching after cancel, speed, docs rewrite
+
+**Six Chrome windows after one cancel — found the real gap.** The previous
+fix checked the abort signal at `runTool` entry, but a browse takes seconds:
+by the time the next queued tool call arrived, that check had already passed
+and Chrome launched anyway. Guarding at the call site was never going to
+hold.
+
+Moved the check into `getSession()` — the single function that can create a
+browser window, so it's the only place the guard is guaranteed to apply. A
+cancelled conversation is now recorded in a set, and the abort event fires
+the moment Stop is pressed rather than waiting for the loop's next
+checkpoint. The set clears on the next message so the conversation stays
+usable.
+
+**Speed.** The cursor animation was being awaited before reading each page —
+~300ms per navigation for something purely cosmetic. Now fire-and-forget:
+still visible, no longer blocking. Also halved the mouse step delay (14ms →
+8ms), reduced step counts, and cut post-navigation waits (250ms → 120ms,
+700ms → 450ms, 400ms → 200ms). Compounded across a multi-step task this is
+the difference between sluggish and responsive.
+
+**Docs rewritten as actual documentation.** It was one long page of loosely
+grouped paragraphs. Now has a persistent sidebar with nested sections,
+scroll-spy highlighting the current heading, and consistent components for
+headings, code blocks, tables, and callouts — so every section looks the
+same instead of each inventing its own layout. Content reorganised into
+Getting started / Browser control / Capabilities / Workflows / Contributing,
+with a proper tool reference table showing which tools need approval.
+
+27 tests passing.
+
+---
+
+## 52. Landing page rebuilt around how people actually decide
+
+The page had the right pieces in the wrong order — the live demo sat second,
+before anyone knew what they were looking at, and there was no answer to the
+obvious question ("do I hand over my passwords?") anywhere on it.
+
+**Reordered into a narrative:** what it does → how it works → why it's
+different → try it → workflows → pricing → questions → start. The demo now
+lands after someone understands what they're testing, which is when they'll
+actually engage with it.
+
+**New: How it works.** A four-step vertical timeline — ask, watch, approve,
+finished — with a line that draws itself as you scroll and steps that fade in
+staggered. Most people don't read feature lists but will follow a sequence,
+and this one carries the core pitch in four sentences.
+
+**New: FAQ.** Eight real objections, answered honestly — including the ones
+that don't flatter the product. It says plainly that Google Search and
+Cloudflare-protected sites still block automated browsers, because a page
+that only makes claims reads as marketing, while one that names its own
+limits reads as something built by people who actually use it.
+
+**Copy.** The closing CTA moved from "Clone it. Add your key." (which speaks
+only to developers) to "Stop reading about it. Give it something to do." The
+demo header now clarifies it's a read-only slice of the real thing.
+
+27 tests passing.
+
+---
+
+## 53. Positioning for people who aren't developers
+
+The page was written by a developer for developers — "MIT licensed" in the
+nav, "Fork it" as the secondary CTA, "bring your own model" as the tagline,
+and a use case about restarting Kubernetes pods. None of that means anything
+to someone who just wants their inbox handled.
+
+**Copy rewritten throughout:**
+- Tagline: "Open source · bring your own model" → "Your own AI assistant that
+  actually does things"
+- Hero now describes outcomes (job applications, inbox triage, research,
+  bookings) rather than architecture
+- Secondary CTA: "Fork it" → "See how it works"
+- Removed the MIT badge and GitHub star button from the nav; added Pricing
+- Use cases: swapped the Kubernetes example for booking a restaurant table,
+  and "service watch" for price/availability monitoring
+- Pricing: "10 agent tasks" → "10 tasks a month", "Fast/economy hosted model"
+  → "Fast, capable AI model included", "Self-hosted" → "Run it yourself"
+
+Open source is still mentioned — it's a genuine trust signal — but as
+reassurance rather than the lead.
+
+**Colour.** The palette was dead-neutral grey, which reads as a developer
+tool. Warmed it slightly (hue 60, very low chroma) and made amber the actual
+primary colour, so buttons look clickable rather than being white-on-black.
+
+**Privacy policy and terms**, both written to describe what this software
+genuinely does — the browser runs on the user's machine, so most standard
+SaaS privacy language doesn't apply. Flagged in code comments as a starting
+point needing legal review before launch, with contact details to fill in.
+
+**Real footer** — four columns (product, resources, legal, brand) replacing
+the single thin line, with the legal links a payment processor will expect.
+
+---
+
+## 54. Case studies and About, rewritten to sell
+
+**Case studies were describing a product that no longer exists.** All three
+were about the simulated Kubernetes demo — database connection exhaustion,
+pod crash loops, `payments-api`. Nothing to do with what the agent actually
+does now.
+
+Rewritten around four real tasks: applying to a job, morning inbox triage,
+comparing vendors, and running something on a schedule. Each walks through
+what happens step by step, with the time it saves and the guarantee attached.
+Renamed to "What it can do" across the nav — "case studies" implies customer
+stories, and there aren't any yet. The page says that plainly rather than
+inventing quotes.
+
+**Custom SVG illustrations** rather than stock icons — a browser filling a
+form field by field, an inbox with two messages flagged, three sources
+converging into one document, a schedule with repeat runs. Each carries the
+cursor motif, since "something is using your computer" is the whole idea.
+They use `currentColor` and the theme variable, so they follow the palette.
+
+**About was explaining architecture.** Provider abstractions, permission
+layers, open-core licensing — none of which answers "why should I trust
+this with my email?" Rewritten to lead with the actual gap it fills ("ask a
+chatbot to apply for a job and it explains how to apply for a job"), then
+three trust principles: you watch it work, it asks before it acts, you can
+leave whenever.
+
+**Contact email** filled in throughout — laeeq@northfoundry.co in the privacy
+policy, terms, and About page.
+
+**Legal links** added to the marketing shell footer, so privacy and terms
+are reachable from every page rather than only the homepage.
+
+---
+
+## 55. Pre-deployment audit — all 14 findings fixed
+
+### Deployment blockers
+
+**1. The Docker image could not run the product.** `node:24-alpine` with no
+Chromium and no Playwright install. Alpine uses musl libc; Playwright's
+browsers need glibc. Every browser tool — the entire product — would have
+failed at runtime on first deploy. Now built on
+`mcr.microsoft.com/playwright:v1.49.0-jammy`, with layer-cached installs.
+
+**2. Headless server rendering.** Documented `BROWSER_HEADLESS=true` as the
+container default, since a server has no display.
+
+**3. No graceful shutdown.** Every ECS redeploy orphaned Chromium processes
+until the task died on memory. Added SIGTERM/SIGINT handling that closes all
+browser sessions and the DB pool, with an 8s cap so it can't hang.
+
+**4. No healthchecks.** Added to the API container plus Postgres and Redis,
+so the orchestrator can tell a hung container from a healthy one.
+
+### Security
+
+**5. `cors()` with no arguments** allowed every origin — any site could call
+the API with a signed-in user's credentials. Now restricted via
+`ALLOWED_ORIGINS`, with a startup warning if it's unset in production.
+Added `helmet` for standard security headers.
+
+**6. No request body limit.** Capped at 256kb.
+
+**7. No rate limiting outside the demo.** Usage limits are per-task, which
+does nothing to stop hundreds of requests a minute against your provider
+bill. Added per-IP limiters on chat, investigate, workflow runs, checkout,
+approvals, settings, and profile.
+
+### Product
+
+**8. The agent could not type without approval** — the single biggest reason
+it felt slower than doing things yourself. "Search YouTube for X" meant
+browse → propose → wait for a human → execute. New `typeInto` tool is
+ungated, because typing changes nothing; the submit still needs approval.
+Password, PIN, CVV, card-number and OTP fields are refused outright and
+routed through the approval gate, with a test guarding that.
+
+**9. Scrolling and key presses moved no visible cursor** — half of all
+actions happened invisibly. Both now show the pointer. Scrolling also uses a
+real mouse wheel event rather than `window.scrollBy`, so infinite-scroll
+feeds actually load more.
+
+**10. No `waitForElement`.** The agent clicked before pages rendered, failed,
+and burned turns retrying a timing problem.
+
+**11. Forty seconds of silent "thinking..."** New progress endpoint plus
+polling in the UI, showing "Opening a page", "Searching the web", "Typing" —
+in plain language, not tool names.
+
+### Business model
+
+**12. Billing on messages was the wrong unit.** "What's 2+2" and "apply to
+five jobs" both counted as one task despite a ~30x cost difference, so the
+heaviest users were the least profitable. Now bills per STEP (one model
+call), which is what actually maps to provider cost.
+
+**13. Limits repriced** to 60 free / 2,000 Pro steps, roughly matching the
+old task counts while making cost visible. Deliberately does not cut a task
+off mid-run — it over-runs slightly and refuses the next one, rather than
+leaving someone with nothing for what they've already spent.
+
+**14. No usage visibility.** The billing page now explains what a step is
+("a quick question is 1–2; a full job application is 8–12") with a progress
+bar, so the limit stops feeling arbitrary.
+
+29 tests passing.
+
+---
+
+## 56. Why it couldn't write in the notepad
+
+**The root cause: it literally could not see the text box.** An empty
+`<textarea>` has no label, no placeholder, and no name — and
+`collectInteractiveElements` skipped anything without a label. So the agent
+opened the notepad, read the page successfully, and saw zero places to type.
+
+That's the whole trace: `browseWeb → readPageAsMarkdown → browseWeb →
+scrollPage ×3 → clickToNavigate → browseWeb → webSearch`. It wasn't
+confused, it was hunting for something the page-reader never reported.
+
+Text inputs now always appear, labelled by what they are — "textarea field
+(empty)", "text editor area" — with a positional `nth=` selector since there's
+nothing to match on by name. Checkboxes, radios, and hidden inputs are still
+skipped.
+
+**It searched the web for a CSS selector.** `site:onlinenotepad.org notepad
+textarea selector` — which can never work, and burned several steps. The
+prompt now states plainly: never search for selectors, the answer is in the
+interactiveElements list you already have. Also: don't re-browse a page
+you're already on, which was the other repeated waste.
+
+**Step budget.** Raised 10 → 16, and the model is now told when it's within
+three steps of the limit so it wraps up with what it has instead of exploring
+until it's cut off with nothing.
+
+**Expandable steps.** The trace was a row of bare tool names with no way to
+tell what happened. Now each step is a row you can click open to see exactly
+what was sent and what came back, with success/failure marks and readable
+names ("Opened a page", not "browseWeb"). Collapsed to four by default so a
+long task doesn't bury the answer.
+
+**Login modal.** The social buttons were rendering dark-on-dark against the
+themed card and looked disabled. Clerk's defaults assume a light background;
+now explicitly styled, along with the primary button and links.
+
+32 tests passing.
+
+---
+
+## 57. Second audit — six real bugs found
+
+**1. Typing failed on rich-text editors.** Playwright's `fill()` only works
+on `<input>` and `<textarea>`; rich-text editors are contenteditable divs —
+which is what most online notepads, doc editors, and comment boxes use. So
+`typeInto` threw on exactly the surfaces it was added for. Now falls back to
+select-all + type, which works on both.
+
+**2. `browseWeb` re-navigated to the page it was already on.** The agent does
+this constantly ("let me check the page again") and each time it cost a full
+page load AND wiped anything typed into the page. Now skipped when the URL
+matches.
+
+**3. The agent never checked its own work.** It would type into a box, never
+verify, and report success — which is how you get "I've written that for
+you" when nothing was written. New `verifyPageContains` tool, and the prompt
+now requires confirming before claiming anything was written or submitted.
+It checks input VALUES too, not just rendered text, since typed content
+lives in `element.value` and never appears in `innerText`.
+
+**4. `webSearch` was in the parallel-safe list but now drives the shared
+browser page.** Two searches at once navigated the same tab and overwrote
+each other's results. Removed, and the guard test updated to catch it.
+
+**5. Tool schemas cost 1,444 tokens on every single turn** — 18% of Groq's
+free-tier minute budget, resent 16 times a task. Seven of those tools are
+service-health / Kubernetes / incident tools that are dead weight for a
+browsing agent and useless unless the demo services were seeded. Now behind
+`ENABLE_INFRA_TOOLS`, off by default.
+
+**6. `screenshotPage` was built but never registered** — dead code the agent
+could never call.
+
+32 tests passing.
+
+---
+
+## 58. Model catalog refresh and codebase search
+
+**The Groq model list was stale.** Checked the current catalog rather than
+trusting the old list — Kimi K2 has been dropped, and Qwen3-32B and Llama 4
+Scout are now available. Updated to: gpt-oss-120b, qwen3-32b,
+llama-3.3-70b-versatile, llama-4-scout, gpt-oss-20b, llama-3.1-8b-instant,
+and both Compound variants.
+
+**Default changed from 20B to 120B.** Counterintuitive but correct for this
+workload: on a browsing agent the bottleneck is reasoning quality, not
+tokens/sec. A model that picks the right selector first time finishes in six
+steps where a weaker one flails through sixteen — so the "slower" model is
+faster in wall-clock terms and cheaper, since every step resends the whole
+conversation. The 20B default is a large part of why tasks were taking
+sixteen steps and still failing.
+
+The settings dropdown now explains each model in plain language
+("Recommended — best reasoning, finishes tasks in fewer steps") rather than
+listing bare model IDs, since choosing badly was the most common cause of
+poor results.
+
+**Codebase search added.** The agent could read files but had no way to find
+them — so working on code meant guessing paths one at a time and burning
+steps on misses. `searchProjectFiles` walks the project, skips
+node_modules/dist/build and minified files, and returns file paths with line
+numbers. Verified working against this repo before shipping.
+
+32 tests passing.
+
+---
+
+## 59. QA audit — verified rather than assumed
+
+**Tested the DOM logic for real.** Playwright's browsers can't download in
+this environment, so instead of claiming the element collection worked, I
+extracted the exact shipped `page.evaluate` body and ran it against jsdom.
+Six tests now cover the notepad textarea case, contenteditable editors, href
+extraction, regex escaping, hidden-input filtering, and the result cap.
+
+That immediately found a real bug: the code relied solely on `innerText`,
+which is layout-dependent and returns empty for elements that are scrolled
+out of view or inside `display:contents` wrappers — so real links were being
+silently dropped, not just jsdom ones. Added a `textContent` fallback.
+
+### Bank transfer — two gaps that would have cost real money
+
+**Users were never told their payment was approved.** They'd transfer money,
+upload a receipt, and hear nothing — no email, no in-app message, no way to
+check. The predictable outcomes are paying twice or asking for a refund.
+Approval and rejection now both send a notification.
+
+**No way to check their own submission.** Added `/billing/my-payments` and a
+section on the billing page showing each receipt with its status
+("Awaiting review", "Approved") and dates.
+
+### Business gaps
+
+**The first-run suggestions assumed a developer AND a configured browser.**
+"Check what's in my inbox" fails silently for anyone who hasn't set
+`CHROME_USER_DATA_DIR` — a terrible first impression. Replaced with four
+prompts that work out of the box and speak to business users.
+
+**The highest-value capability was invisible.** Reading your actual email,
+LinkedIn, and Slack requires connecting your Chrome profile, but nothing
+told anyone that — tasks needing it just failed. The chat now shows a
+one-time prompt explaining what connecting unlocks, with a link to setup.
+
+38 tests passing (was 32).
+
+---
+
+## 60. Landing page — selling to the actual buyer
+
+**The hero showed a curl command.** `TerminalDemo` sat directly beside the
+pitch, in the one place a non-technical visitor decides whether this product
+is for them. Replaced with `TaskPreview`: an animated run of a real task
+("Apply to the best backend role at Stripe") that ends on the approval
+prompt — since the approval gate is the actual differentiator, the preview
+should end there rather than on "done".
+
+**Headline was abstract.** "It doesn't explain. It does the work." is clever
+but takes a beat to parse and never says what the thing IS. Now "Give it a
+task. Watch it get done." — concrete, and the subhead lists what it actually
+handles.
+
+**A broken nav link.** "Incidents" pointed at `/dashboard`, which requires
+auth — so a signed-out visitor clicking it hit a redirect. It was also
+meaningless to the target audience. Removed.
+
+**Nav order and branding.** Docs was first, which signals "developer tool"
+before anything else; now: What it can do → Pricing → About → Docs. Brand
+shortened from "Act · SWE Agent" to "Act" — "SWE Agent" means nothing to a
+business owner.
+
+**Sub-pages looked like a different product.** The marketing shell used a
+back-arrow instead of the logo, a different brand string, and carried a
+GitHub "Star" button next to the CTA — splitting attention between two
+audiences and pulling people off-site at the decision point. Now matches the
+landing nav exactly.
+
+38 tests passing.
+
+---
+
+## 61. Multi-stage workflows and spreadsheet output
+
+**A workflow was one prompt in one turn**, which meant your lead-generation
+example was impossible: "find businesses → check their websites → email
+them" is three distinct jobs, and cramming them into one prompt meant the
+agent ran out of steps around stage two.
+
+Workflows now have **stages**. Each runs as a separate agent turn with its
+own full step budget, all sharing one conversation — so stage 2 sees what
+stage 1 found without anything being passed explicitly.
+
+**Spreadsheet output added.** Real `.xlsx` via ExcelJS, not CSV — a lead list
+is only useful if you can open, sort, and filter it, and CSV breaks the
+moment a field contains a comma. Rows **append across runs**, so a workflow
+scraping 20 businesses an hour builds one growing sheet rather than 24 files
+a day. New columns can appear later without dropping earlier rows.
+
+Verified with 5 tests covering write, read-back, append-across-runs,
+schema evolution, and a path-traversal guard (a model-supplied sheet name
+can't escape the output directory).
+
+**Templates.** Nobody discovers multi-stage pipelines from an empty textarea.
+The workflow form now offers three prefilled examples — local business leads
+(the full three-stage version), inbox triage, and competitor price tracking.
+
+### Google OAuth verification guide
+
+`docs/GOOGLE-OAUTH-VERIFICATION.md` — privacy policy wording (including the
+Limited Use clause reviewers check for directly), per-scope justifications,
+the five most common rejection causes, and the submission checklist.
+
+The most useful finding: **`gmail.send` is only "sensitive", not
+"restricted"** — so sending doesn't trigger a third-party security
+assessment, while `gmail.readonly` does. Those assessments run $15k–$75k.
+Shipping with `gmail.send` + browser automation for reading gives users the
+same features with no assessment, which is the right sequencing before
+there's revenue to justify it.
+
+43 tests passing (was 38).
+
+---
+
+## 62. Slack and Notion — direct API access
+
+The agent now talks to Slack and Notion through their APIs rather than
+driving the web UI. An API call is one request; browser automation is a page
+load, a DOM scrape, and several clicks — so this is dramatically faster and
+doesn't break when either service ships a redesign.
+
+**Read tools (no approval):** `listSlackChannels`, `readSlackChannel` (with
+sender IDs resolved to real names), `searchSlack`, `searchNotion`,
+`readNotionPage`.
+
+**Write actions (approval required):** `slack_message` and `notion_append`
+go through the same `proposeAction` gate as everything else.
+
+### Security decisions worth noting
+
+**Signed CSRF state.** The OAuth `state` parameter is HMAC-signed and
+expires after 10 minutes, with a constant-time signature comparison. Without
+this, an attacker can trick someone into connecting *their* account to the
+attacker's workspace — a real and commonly exploited OAuth flaw.
+
+**Narrow Slack scopes.** Channels the user is in, not workspace-wide admin.
+Easier to justify and far less damaging if a token ever leaks.
+
+**Tokens encrypted at rest** with the same AES-256-GCM key as provider API
+keys, and never returned to the frontend — the UI only learns that a
+connection exists and which workspace.
+
+### A bug typecheck couldn't catch
+
+`AgentAction` had no `userId`. Approving a Slack message would have used
+whichever connection happened to resolve — potentially **someone else's
+workspace** in hosted mode. Caught by checking the schema directly rather
+than trusting that a clean typecheck meant the field existed (Prisma's types
+aren't regenerated in this environment, so it compiled fine). Added `userId`
+and it's now recorded on every proposed action.
+
+**Tools are only offered when connected.** Otherwise every turn carries five
+tool schemas the model can never successfully call, and it wastes steps
+discovering that.
+
+Setup is in `apps/api/.env.example`. Slack and Notion both approve public
+integrations in days, unlike Gmail's 4–6 week review.
+
+43 tests passing.
+
+---
+
+## 63. Model wouldn't save, typing silently failed, Google search useless
+
+**"Change the model" did nothing.** `openai/gpt-oss-120b` was on the premium
+model list from before it became the free Groq default — a direct
+contradiction I introduced two rounds ago. Selecting it without Pro or a
+personal key returned a 403, and the dropdown just looked frozen. Groq's
+entire catalog is free-tier by design; none of it belongs on a premium list.
+Removed.
+
+**"It selected everything and typed nothing" — this was a real, specific
+bug, not vague flakiness.** `typeInto` clicked a field and immediately typed
+into it with no check that the click had actually moved focus there. Some
+sites intercept a click on their search box (autocomplete overlays,
+combobox wrappers) and keep focus elsewhere — Google's homepage search is
+exactly this kind of element. When that happens, "select all + delete" (the
+notepad workaround) ran against whatever WAS focused instead, which is
+precisely "moved to search and selected everything."
+
+Fixed with two checks, not one:
+1. **Before typing** — confirm the clicked element is actually
+   `document.activeElement`; if not, explicitly focus it and re-check. If it
+   still isn't focused, fail with a specific reason instead of typing
+   blind.
+2. **After typing** — confirm the field's value actually contains what was
+   typed. Some sites reset controlled inputs faster than typing can react,
+   and `pressSequentially` doesn't throw when that happens — it would have
+   reported success on an empty field.
+
+Both failure paths return the current `interactiveElements` so the agent can
+recover instead of repeating the same broken action.
+
+**"It didn't search shit."** Nothing told the model to prefer `webSearch`
+over browsing to google.com directly — and Google specifically fights
+automated browsers with CAPTCHAs and layout tricks, precisely because so
+many bots type into its search box. The prompt now says this outright:
+never navigate to Google's search box, `webSearch` exists so you never have
+to, and if its results aren't enough, browse a specific site directly
+instead of going through Google.
+
+48 tests passing (was 43) — includes 5 new tests locking down the
+type-verification decision rules, and a correction to the premium-model
+test that had been asserting the broken behavior as correct.
+
+---
+
+## 64. Composer's model label was stale, 413 killed the whole task
+
+**The chip at the bottom didn't update after saving a new model.** It only
+re-fetched `/ai/status` when the settings dialog's OPEN state toggled — so
+it showed the old model on open, and its close-triggered refetch could race
+the save request and read before the write landed. Real fix: the settings
+panel now calls back the instant a save actually succeeds, so the composer
+updates immediately and correctly rather than depending on dialog
+visibility as a proxy for "did it save."
+
+**`413 Request too large` was killing the whole task, one call from a real
+fix.** The history compactor already truncated older tool results, but only
+at one fixed aggressiveness — it never reacted to a SPECIFIC request coming
+in over budget, which is exactly what happens once enough tool schemas are
+offered on Groq's 8,000 tokens/minute free tier.
+
+Added a real retry: on 413, the same turn retries immediately with history
+cut far harder (last tool result only, capped at 60 chars instead of 200)
+rather than losing the whole task to one oversized call.
+
+**Writing the test caught a real bug in the fix itself.** The token
+estimator converted a character count to a string and estimated tokens from
+the STRING'S LENGTH — `"8000".length` is 4, not 8000÷4. So the estimate was
+wildly wrong for exactly the case it existed to catch. Fixed to operate on
+the actual numeric count.
+
+51 tests passing (was 48) — 8 new tests covering the adaptive trim levels
+and the token estimator, one of which caught the bug above before it shipped.
+
+---
+
+## 65. The model chip really was resetting — two bugs stacked
+
+**My fix last round was incomplete.** I added `onSaved` so the composer
+updates the instant a save succeeds — but left the OLD effect in place,
+still re-firing on every `settingsOpen` toggle. Closing the dialog after
+saving re-triggered `/ai/status`, which raced (and usually beat) the correct
+`onSaved` update, overwriting it.
+
+**And that refetch was itself broken.** It sent no auth headers at all, so
+in hosted mode `/ai/status` always resolved as an anonymous request —
+`getProvider(undefined)` — which falls through to the server's env default
+model, never the signed-in user's saved Pro selection. That's the actual
+reason it kept landing on `gpt-oss-20b` specifically, regardless of what was
+saved.
+
+Fixed both: the status check now sends real auth headers via the same
+`authHeaders()` every other request on the page uses, and it only runs once
+on mount — `onSaved` is now the sole source of truth for the chip after a
+save, with nothing left to race it.
+
+51 tests passing.
+
+---
+
+## 66. The real reason it was slow: fixed cost, not history
+
+**Measured it instead of guessing.** Every single turn was paying **3,492
+tokens of fixed overhead** — 1,703 for the system prompt, 1,789 for 53 tool
+schemas — before a single word of conversation history was sent. On Groq's
+8,000/min free tier, that's 44% of the entire budget gone before the actual
+task even starts. This is why the history-trimming retry from last round
+helped but didn't fully fix the 413s: no amount of trimming history can
+compensate for the fixed cost alone eating half the budget.
+
+**System prompt rewritten**, not just shortened. Six rounds of incremental
+patches had left the same ideas stated multiple times in different words
+("never ask permission to click" appeared three separate times). Every rule
+survived, restated once each: 6,843 → 1,787 characters, ~1,703 → 446 tokens.
+
+**Trimmed the two heaviest tool descriptions** (`browseWeb`, `clickToNavigate`),
+which were re-explaining the approval-gate reasoning that now lives once in
+the system prompt.
+
+**Combined fixed overhead: 3,492 → 1,986 tokens per turn** — roughly
+2,000 tokens of the 8,000/minute budget given back to actual history and
+tool results on every single call.
+
+### Refresh lost the conversation — a real gap, not a caching quirk
+
+The active conversation id lived only in React state, reset to `null` on
+every page load, with nothing anywhere reading it back. Now persisted to
+`sessionStorage` and — the part that actually matters — restored on mount by
+calling the same `selectConversation` the sidebar uses, which is the only
+function that fetches a conversation's actual messages. Restoring the id
+alone would have looked identical to a fresh chat with a random UUID
+attached; this fetches the real history back too.
+
+51 tests passing.
+
+---
+
+## 67. The actual bug behind the 413s — found from your trace, not guessed
+
+Your trace showed the real cause, and it was different from what I fixed
+last round. `browseWeb` on Google Maps returned 25 elements, several with
+**hundreds of characters of tracking data in the href** — and "recent" tool
+results were kept **completely uncapped**, on the assumption that only old
+results needed shrinking. A single content-heavy page could exceed the
+entire 8,000-token budget by itself, and no amount of trimming *older*
+history helps when the *current* result is already that large.
+
+Two fixes, both at the actual source:
+
+**1. Href length capped at 200 chars in `collectInteractiveElements`.**
+Google's tracking-laden URLs are dropped; the element stays clickable via
+its selector, which doesn't carry that cost.
+
+**2. A real absolute ceiling added to `compactHistoryForRequest`** — every
+tool result now has a hard cap (3,000 chars for "recent" ones, 200 for
+older), where before "recent" meant no cap at all. That's the actual
+structural fix: not more aggressive trimming, but closing the gap where
+trimming didn't apply.
+
+Added a test that reproduces the exact scenario — a single 9,000-character
+result, the size a Maps page like the one in your trace produces — and
+asserts it gets capped. Also caught and fixed an assertion in the existing
+test suite that had encoded the old, broken assumption ("recent = kept
+intact, no matter how large") as the expected behavior.
+
+52 tests passing (was 51).
