@@ -1,4 +1,3 @@
-"use client"
 import Link from "next/link";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import {

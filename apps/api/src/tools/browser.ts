@@ -57,6 +57,10 @@ export function markSessionCancelled(sessionKey?: string): void {
   cancelledSessions.add(keyFor(sessionKey));
 }
 
+export function isSessionCancelled(sessionKey?: string): boolean {
+  return cancelledSessions.has(keyFor(sessionKey));
+}
+
 export function clearSessionCancelled(sessionKey?: string): void {
   cancelledSessions.delete(keyFor(sessionKey));
 }
@@ -117,7 +121,15 @@ async function getSession(key: string): Promise<Session> {
     existing.lastUsed = Date.now();
     return existing;
   }
-  if (existing) sessions.delete(existing.page.isClosed() ? key : key);
+  if (existing) {
+    // The user closed the window manually. Dropping it from the map alone
+    // leaked the context and browser process — they stayed alive headless
+    // and orphaned, which is why closing a window just made another appear.
+    // Tear the whole thing down before replacing it.
+    sessions.delete(key);
+    await existing.context.close().catch(() => {});
+    await existing.browser?.close().catch(() => {});
+  }
 
   const inFlight = launching.get(key);
   if (inFlight) return inFlight;
@@ -167,12 +179,29 @@ async function getSession(key: string): Promise<Session> {
       Object.defineProperty(navigator, "webdriver", { get: () => undefined });
     });
 
-    const page = await context.newPage();
+    // launchPersistentContext already opens a page — calling newPage()
+    // creates a SECOND, blank one, which is the stray about:blank window
+    // that kept appearing (and reappearing, since closing the visible tab
+    // left the other alive and the session still registered). Reuse the
+    // existing page when there is one.
+    const page = context.pages()[0] ?? (await context.newPage());
     // Logged per launch so "I don't see a browser" is answerable from the
     // terminal instead of by guessing at env vars.
     console.log(
       `[browser] launched session "${key}" — visible: ${isVisible() ? "YES" : "NO (set BROWSER_HEADLESS=\"false\")"}, profile: ${userDataDir ? "yours" : "throwaway"}`
     );
+    // Launching a browser takes seconds. If the user cancelled DURING that
+    // window, the entry check above already passed and this launch would
+    // otherwise complete and register a live window anyway — which is
+    // exactly how a browser kept opening after Stop was pressed. Re-check
+    // now and tear it straight back down.
+    if (cancelledSessions.has(key)) {
+      launching.delete(key);
+      await context.close().catch(() => {});
+      await browser?.close().catch(() => {});
+      throw new Error("Cancelled by user — not launching a browser.");
+    }
+
     const session: Session = { context, page, browser, lastUsed: Date.now() };
     sessions.set(key, session);
     launching.delete(key);
@@ -342,7 +371,22 @@ async function collectInteractiveElements(p: Page): Promise<InteractiveElement[]
         // via its selector, which doesn't carry this cost.
         if (rawHref && !rawHref.startsWith("javascript:") && rawHref.length <= 200) href = rawHref;
       } else if (tag === "input" || tag === "textarea" || tag === "select" || el.getAttribute("contenteditable") === "true") {
-        selector = `text=${nameMatch} >> visible=true`;
+        // A `text=` selector matches an element's VISIBLE TEXT CONTENT —
+        // which a form field never has. Using it for inputs meant the
+        // selector silently matched some other element containing that word
+        // instead (on Google, the label "Search" matched the "How Search
+        // works" footer LINK), so typing navigated away rather than typing.
+        // Match on the accessible role/name, which is what actually
+        // identifies a field, and fall back to a positional selector.
+        const sameTag = Array.from(document.querySelectorAll(tag));
+        const idx = sameTag.indexOf(el);
+        // Use the element's OWN role when it declares one. Google's search
+        // box is a <textarea role="combobox">, so hardcoding "textbox" here
+        // produced a selector that matched nothing at all — which is
+        // exactly why typing silently did nothing on google.com.
+        const explicitRole = el.getAttribute("role");
+        const inputRole = explicitRole || (tag === "select" ? "combobox" : "textbox");
+        selector = label ? `role=${inputRole}[name=${nameMatch}]` : `${tag} >> nth=${idx}`;
       } else selector = `text=${nameMatch}`;
       results.push({ selector, text: trimmed, href });
       if (results.length >= 25) break; // keep the payload small — see the TPM note above
@@ -377,7 +421,14 @@ export async function performFormFill(payload: FormFillPayload, sessionKey?: str
       const box = await locator.boundingBox({ timeout: 8_000 }).catch(() => null);
       if (box) await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
       await locator.click({ timeout: 8_000 }).catch(() => {});
+      // Same guard typeInto already has, which this path was missing:
+      // Ctrl+A with nothing focused selects the ENTIRE PAGE, which is
+      // exactly what produced the "everything highlighted blue" screenshot.
+      // Only fall back to select-all when this element genuinely holds
+      // focus; otherwise skip clearing rather than nuking the page.
       await locator.fill("").catch(async () => {
+        const focused = await locator.evaluate((el) => el === document.activeElement).catch(() => false);
+        if (!focused) return;
         await page.keyboard.press("Control+A");
         await page.keyboard.press("Delete");
       });
@@ -797,6 +848,11 @@ export async function typeInto(
     }
 
     await locator.fill("").catch(async () => {
+      // Focus was already verified above, but re-check: fill() can fail
+      // precisely because the element lost focus between the two calls,
+      // and an unfocused Ctrl+A selects the whole page.
+      const stillHasFocus = await locator.evaluate((el) => el === document.activeElement).catch(() => false);
+      if (!stillHasFocus) return;
       await page.keyboard.press("Control+A");
       await page.keyboard.press("Delete");
     });

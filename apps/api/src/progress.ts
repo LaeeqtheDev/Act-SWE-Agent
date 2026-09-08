@@ -11,6 +11,7 @@
 interface Progress {
   step: number;
   activity: string;
+  detail?: string;
   updatedAt: number;
 }
 
@@ -38,8 +39,8 @@ export function describeTool(name: string): string {
   return ACTIVITY[name] ?? `Running ${name}`;
 }
 
-export function setProgress(conversationId: string, step: number, activity: string): void {
-  progress.set(conversationId, { step, activity, updatedAt: Date.now() });
+export function setProgress(conversationId: string, step: number, activity: string, detail?: string): void {
+  progress.set(conversationId, { step, activity, detail, updatedAt: Date.now() });
 }
 
 export function getProgress(conversationId: string): Progress | null {

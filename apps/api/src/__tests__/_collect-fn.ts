@@ -66,9 +66,32 @@ export function collect(): { selector: string; text: string; href?: string }[] {
         // pure navigation, reserving the gate for things that actually
         // submit, send, or change something.
         const rawHref = (el as HTMLAnchorElement).href;
-        if (rawHref && !rawHref.startsWith("javascript:")) href = rawHref;
+        // Real bug found from a live trace: Google Maps (and similar sites)
+        // embed hundreds of characters of tracking/encoded data in every
+        // link's href. With up to 25 elements on a page, that alone was
+        // several thousand characters — and because "recent" tool results
+        // were kept completely uncapped, a single Maps page could exceed
+        // the entire token budget by itself, no matter how well history was
+        // trimmed. A long href is dropped; the element is still clickable
+        // via its selector, which doesn't carry this cost.
+        if (rawHref && !rawHref.startsWith("javascript:") && rawHref.length <= 200) href = rawHref;
       } else if (tag === "input" || tag === "textarea" || tag === "select" || el.getAttribute("contenteditable") === "true") {
-        selector = `text=${nameMatch} >> visible=true`;
+        // A `text=` selector matches an element's VISIBLE TEXT CONTENT —
+        // which a form field never has. Using it for inputs meant the
+        // selector silently matched some other element containing that word
+        // instead (on Google, the label "Search" matched the "How Search
+        // works" footer LINK), so typing navigated away rather than typing.
+        // Match on the accessible role/name, which is what actually
+        // identifies a field, and fall back to a positional selector.
+        const sameTag = Array.from(document.querySelectorAll(tag));
+        const idx = sameTag.indexOf(el);
+        // Use the element's OWN role when it declares one. Google's search
+        // box is a <textarea role="combobox">, so hardcoding "textbox" here
+        // produced a selector that matched nothing at all — which is
+        // exactly why typing silently did nothing on google.com.
+        const explicitRole = el.getAttribute("role");
+        const inputRole = explicitRole || (tag === "select" ? "combobox" : "textbox");
+        selector = label ? `role=${inputRole}[name=${nameMatch}]` : `${tag} >> nth=${idx}`;
       } else selector = `text=${nameMatch}`;
       results.push({ selector, text: trimmed, href });
       if (results.length >= 25) break; // keep the payload small — see the TPM note above

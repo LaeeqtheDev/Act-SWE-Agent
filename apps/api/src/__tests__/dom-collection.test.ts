@@ -57,6 +57,34 @@ describe("interactive element collection (real shipped logic)", () => {
     expect(() => new RegExp(pattern!, "i")).not.toThrow();
   });
 
+  it("NEVER gives a form field a text= selector — it matched the wrong element entirely", () => {
+    // The real bug: `text=` matches an element's VISIBLE TEXT CONTENT, which
+    // an <input> never has. On Google, the search box labelled "Search"
+    // produced `text=/Search/i`, which matched the "How Search works" footer
+    // LINK instead — so "type into the search box" navigated to a different
+    // page and then select-all'd it.
+    render(`
+      <input aria-label="Search" />
+      <a href="https://google.com/search/howsearchworks">How Search works</a>
+    `);
+    const out = collect();
+    const field = out.find((e) => e.text === "Search");
+    expect(field, "the input must be reported").toBeDefined();
+    expect(field!.selector.startsWith("text="), `got ${field!.selector}`).toBe(false);
+    expect(field!.selector).toContain("textbox");
+  });
+
+  it("respects a field's declared role — Google's search box is a combobox, not a textbox", () => {
+    // Straight from a real google.com dump: the search box is a
+    // <textarea role="combobox">. Hardcoding role=textbox produced a
+    // selector matching nothing, so typing silently did nothing.
+    render(`<textarea role="combobox" aria-label="Search"></textarea>`);
+    const field = collect().find((e) => e.text === "Search");
+    expect(field, "the search box must be reported").toBeDefined();
+    expect(field!.selector).toContain("combobox");
+    expect(field!.selector).not.toContain("textbox");
+  });
+
   it("skips hidden inputs and checkboxes that have no label", () => {
     render(`<input type="hidden" /><input type="checkbox" />`);
     expect(collect()).toHaveLength(0);

@@ -10,6 +10,7 @@ import { resumeAfterAction } from "./chat.js";
 import { detectToolFailure, reportAgentIncident } from "./agent-incidents.js";
 import { agentActionsTotal, toolCallsTotal } from "./metrics.js";
 import { postSlackMessage, appendToNotionPage } from "./tools/integrations.js";
+import { isSessionCancelled } from "./tools/browser.js";
 
 const prisma = new PrismaClient();
 
@@ -150,6 +151,18 @@ export async function performAction(actionId: string) {
   const action = await prisma.agentAction.findUnique({ where: { id: actionId } });
   if (!action) throw new Error("action not found");
   if (action.status !== "approved") throw new Error("action is not approved");
+
+  // Cancelling the chat marks the conversation's browser session cancelled,
+  // but this path never checked it — so a pending approved action still
+  // ran and opened a page after the user had already hit Stop. Refuse
+  // outright rather than acting on a task the user abandoned.
+  if (action.conversationId && isSessionCancelled(action.conversationId)) {
+    await prisma.agentAction.update({
+      where: { id: actionId },
+      data: { status: "rejected", result: { note: "Cancelled by the user before this ran." } as object },
+    });
+    throw new Error("This task was cancelled — the action was not run.");
+  }
 
   // Every branch below funnels through this at the end — it's what makes an
   // approval actually finish the task instead of leaving the chat waiting

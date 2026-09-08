@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Check, X, Loader2, Lock } from "lucide-react";
 
 interface ProposedAction {
@@ -26,7 +26,36 @@ export function ProposedActionCard({
   onDecided: (decision: "approved" | "rejected") => void;
 }) {
   const [deciding, setDeciding] = useState<"approved" | "rejected" | null>(null);
-  const [done, setDone] = useState<"approved" | "rejected" | null>(null);
+  // Seeded from the action's REAL status, not just local state. Approving
+  // then reloading (or scrolling back to an older message) re-rendered a
+  // fresh card that was clickable again — so the same action could be
+  // approved twice, and already-decided actions from earlier in the
+  // conversation still showed live buttons.
+  const [done, setDone] = useState<"approved" | "rejected" | null>(
+    action.status === "approved" || action.status === "rejected" ? action.status : null
+  );
+
+  // Confirm against the server on mount — the status embedded in the tool
+  // result is a snapshot from when it was proposed, so an action approved
+  // from the dashboard (or in another tab) would still look pending here.
+  useEffect(() => {
+    if (done) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${apiUrl}/actions/${action.actionId}`, { headers: await authHeaders() });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && (data.status === "approved" || data.status === "rejected")) setDone(data.status);
+      } catch {
+        // status check is best-effort — never block the buttons on it
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action.actionId]);
 
   async function decide(decision: "approved" | "rejected") {
     setDeciding(decision);

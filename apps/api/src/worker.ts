@@ -63,4 +63,28 @@ worker.on("failed", (job, err) => {
   console.error(`[worker] job ${job?.id} failed:`, err.message);
 });
 
+// Without this the Worker prints a full ECONNREFUSED stack trace on every
+// single reconnect attempt — thousands of identical traces that bury every
+// other log line. The worker only drives the simulated incident pipeline,
+// so a missing Redis is a one-line notice, not a crash.
+let warnedNoRedis = false;
+worker.on("error", (err: Error & { code?: string }) => {
+  const isConnRefused = err?.code === "ECONNREFUSED" || err?.message?.includes("ECONNREFUSED");
+  if (isConnRefused) {
+    if (warnedNoRedis) return;
+    warnedNoRedis = true;
+    console.warn(
+      `[worker] Redis isn't reachable at ${connection.host}:${connection.port}. ` +
+        "This worker only powers the simulated incident pipeline — the agent itself is unaffected. " +
+        "Start Redis with `docker compose up redis -d`, or just stop this worker process."
+    );
+    return;
+  }
+  console.error("[worker]", err.message);
+});
+
+// Same reason: exiting cleanly beats an unhandled rejection stack trace.
+process.on("SIGTERM", () => void worker.close().then(() => process.exit(0)));
+process.on("SIGINT", () => void worker.close().then(() => process.exit(0)));
+
 console.log("Worker started, listening for events...");

@@ -12,15 +12,23 @@ import { toolCallsTotal, chatMessagesTotal } from "./metrics.js";
 const prisma = new PrismaClient();
 
 const CHAT_SYSTEM_PROMPT = `You are Act — an AI agent that finishes real tasks, not a chatbot that describes how to.
-Reads (browseWeb, clickToNavigate, scrollPage, goBack, readPageAsMarkdown, webSearch, getUserProfile) need
-no approval — use them freely and keep going. Only proposeAction (form submit, send, post, restart, file
-edit, shell command) needs the user's sign-off, and always as one complete action, never a fragment.
+Reads (browseWeb, clickToNavigate, typeInto, pressKey, scrollPage, goBack, readPageAsMarkdown,
+webSearch, getUserProfile) need no approval — use them freely and keep going.
+
+Approval is ONLY for things that send data somewhere or change state you can't undo: submitting a form,
+sending a message, posting, applying, restarting, editing a file, running a shell command. Clicking play
+on a video, opening a result, expanding a section, typing into a search box — none of that sends
+anything, so never propose it, just do it with clickToNavigate or typeInto. Proposing a play button
+wastes the user's time on a decision that doesn't matter.
 
 RULES, in priority order:
 1. Finish the job. "Find X" means come back with real results, not a status update. Chain tool calls —
    several browseWeb in one turn if you need several pages — until you have the answer.
-2. Act, don't describe. Loading a page is step one. "Play the top song" = search, then open the video
-   (use its href directly if interactiveElements has one — faster than clicking through).
+2. Act, don't describe. Loading a page is step one. "Play X" or "watch/find and play" means: navigate to
+   the actual site (e.g. youtube.com), typeInto its search box, pressKey "Enter", then clickToNavigate the
+   real result — the user is watching this happen, so the visible click is the point, not a shortcut to
+   skip. Only jump straight to an href when the task is informational (reading, comparing, checking
+   something) rather than an explicit watch/play request.
 3. "Thanks"/"ok"/similar = talk, not work. Reply in one line, call no tools.
 4. Never Google-search or web-search for a CSS selector — the fields you need are always already in
    interactiveElements from your last browseWeb ("textarea field (empty)" = an empty box you can type
@@ -216,6 +224,32 @@ async function runAgentLoop(
       }
 
       if (result.toolCalls.length === 0) {
+        // Some models occasionally write out what a tool call would look
+        // like as plain text instead of actually invoking it — the model
+        // "describes" calling proposeAction rather than calling it, and the
+        // user sees raw JSON as the chat reply. Detected by shape rather
+        // than exact wording, since the leaked JSON varies. When this
+        // happens, retry the same turn once with an explicit correction
+        // instead of showing the user broken output.
+        const looksLikeLeakedToolCall =
+          /^\s*\{[\s\S]*"type"\s*:\s*"[a-z_]+"[\s\S]*\}\s*$/i.test(result.text ?? "") &&
+          /(browserPayload|formPayload|slackPayload|notionPayload|filePayload|shellPayload)/.test(result.text ?? "");
+
+        if (looksLikeLeakedToolCall && turn < maxTurns - 1) {
+          // AgentMessage only has user/assistant/tool roles — no system —
+          // so the correction rides in as a synthetic tool result, which
+          // models already treat as actionable feedback from the previous
+          // step rather than conversational content.
+          history.push({
+            role: "tool",
+            toolCallId: `correction-${turn}`,
+            toolName: "system_correction",
+            content:
+              "Your last reply was JSON text describing a tool call instead of an actual tool call. Call proposeAction for real using the tool-calling mechanism, not as text in your response.",
+          });
+          continue;
+        }
+
         finalText = result.text ?? "";
         break;
       }
@@ -238,7 +272,16 @@ async function runAgentLoop(
       const PARALLEL_SAFE = new Set(["listServices", "listIncidents", "getServiceHealth", "getRecentErrors", "getDeploymentHistory", "getKubernetesPodStatus", "getKubernetesEvents", "readProjectFile", "listProjectDirectory", "getUserProfile"]);
 
       const runOne = async (call: ToolCall) => {
-        setProgress(conversationId, stepsUsed, describeTool(call.name));
+        // Include the actual target (URL, query, text) so the live step is
+        // inspectable while it runs, not just a generic label.
+        const input = call.input as Record<string, unknown>;
+        const target = input.url ?? input.query ?? input.text ?? input.selector ?? input.channel;
+        setProgress(
+          conversationId,
+          stepsUsed,
+          describeTool(call.name),
+          typeof target === "string" ? target.slice(0, 120) : undefined
+        );
         const output = await runTool(call.name, call.input, { conversationId, userId, signal: cancelled?.signal });
         detectToolFailure(call.name, output).catch(() => {});
         toolCallsTotal.inc({ tool: call.name, outcome: output && typeof output === "object" && "error" in output ? "error" : "success" });

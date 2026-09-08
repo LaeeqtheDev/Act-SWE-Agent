@@ -806,6 +806,17 @@ app.post("/incidents/:id/actions", async (req, res) => {
   res.json(action);
 });
 
+// Lets the chat confirm whether an action was already decided, so an
+// approved action doesn't render live buttons again after a reload.
+app.get("/actions/:id", async (req, res) => {
+  const action = await prisma.agentAction.findUnique({
+    where: { id: String(req.params.id) },
+    select: { id: true, status: true, type: true, summary: true },
+  });
+  if (!action) return res.status(404).json({ error: "action not found" });
+  res.json(action);
+});
+
 app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
   try {
     await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "approved" } });

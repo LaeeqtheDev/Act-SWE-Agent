@@ -100,6 +100,7 @@ export default function AgentChatPage() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [providerLabel, setProviderLabel] = useState<string | null>(null);
   const [activity, setActivity] = useState<string | null>(null);
+  const [activityDetail, setActivityDetail] = useState<string | null>(null);
   const [chromeConnected, setChromeConnected] = useState<boolean | null>(null);
   // undefined until the token bridge reports in. Self-hosted mode reports
   // undefined immediately (no auth needed); hosted mode reports Clerk's
@@ -107,6 +108,8 @@ export default function AgentChatPage() {
   const [getToken, setGetToken] = useState<(() => Promise<string | null>) | undefined>(undefined);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const cancelledRef = useRef(false);
+  const inFlightRef = useRef<Promise<unknown> | null>(null);
 
   const authHeaders = useCallback(async (): Promise<Record<string, string>> => {
     if (typeof getToken !== "function") return {};
@@ -181,6 +184,7 @@ export default function AgentChatPage() {
         const res = await fetch(`${API_URL}/chat/conversations/${conversationId}/progress`);
         const data = await res.json();
         setActivity(data.activity ? `${data.activity}${data.step > 1 ? ` · step ${data.step}` : ""}` : null);
+        setActivityDetail(typeof data.detail === "string" ? data.detail : null);
       } catch {
         // progress is cosmetic — never let it surface an error
       }
@@ -196,7 +200,12 @@ export default function AgentChatPage() {
   async function selectConversation(id: string) {
     setConversationId(id);
     const res = await fetch(`${API_URL}/chat/conversations/${id}/messages`, { headers: await authHeaders() });
-    const messages: StoredMessage[] = await res.json();
+    const data = await res.json();
+    // Same failure shape as every other list endpoint here: an error path
+    // returns {error} instead of an array, and that was being iterated
+    // directly. Guard it here too, including the restore-on-refresh path
+    // that now calls this on mount with no user click to catch a bad id.
+    const messages: StoredMessage[] = Array.isArray(data) ? data : [];
 
     const rebuilt: ChatTurn[] = [];
     let pendingTrace: ToolTraceEntry[] = [];
@@ -226,10 +235,24 @@ export default function AgentChatPage() {
   }
 
   function cancel() {
-    // Pass an explicit reason — abort() with none surfaces as an
-    // "signal is aborted without reason" AbortError in Next's dev overlay,
+    // Track cancellation in a ref rather than inferring it from whatever
+    // the rejection turns out to be. Passing a reason object made Next's
+    // overlay print "[object Object]"; passing none made it print "aborted
+    // without reason". Neither is a real error — this is a user action.
     // which looks like a crash when it's a deliberate user action.
-    abortRef.current?.abort(new DOMException("Cancelled by user", "AbortError"));
+    // Deliberately a plain object, NOT a DOMException/Error. Next's dev
+    // overlay surfaces any Error-shaped abort reason as an unhandled
+    // runtime error ("AbortError: Cancelled by user") even though this is a
+    // completely normal user action that we handle below.
+    cancelledRef.current = true;
+
+    // Attach a no-op catch to the in-flight request BEFORE aborting. The
+    // try/catch in send() covers the awaited chain, but Next's dev overlay
+    // hooks unhandledrejection and still reports the AbortError at the
+    // abort() call site. Giving the promise its own handler is what
+    // actually stops that — this is a deliberate user action, not an error.
+    inFlightRef.current?.catch(() => {});
+    abortRef.current?.abort();
     abortRef.current = null;
     setSending(false);
     setTurns((prev) => [...prev, { role: "assistant", content: "Stopped." }]);
@@ -239,6 +262,7 @@ export default function AgentChatPage() {
     if (!text.trim() || sending) return;
     const controller = new AbortController();
     abortRef.current = controller;
+    cancelledRef.current = false;
     setTurns((prev) => [...prev, { role: "user", content: text }]);
     setInput("");
     setSending(true);
@@ -253,12 +277,14 @@ export default function AgentChatPage() {
         setConversationId(activeId);
       }
 
-      const res = await fetch(`${API_URL}/chat/conversations/${activeId}/messages`, {
+      const request = fetch(`${API_URL}/chat/conversations/${activeId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...headers },
         body: JSON.stringify({ message: text }),
         signal: controller.signal,
       });
+      inFlightRef.current = request;
+      const res = await request;
       const data = await res.json();
       const replyText =
         typeof data.reply === "string" && data.reply.trim().length > 0
@@ -272,12 +298,17 @@ export default function AgentChatPage() {
       // A cancel is a deliberate user action, not an error to report.
       // DOMException doesn't extend Error in every runtime, so check the
       // name directly rather than relying on instanceof.
-      if ((err as { name?: string })?.name === "AbortError") return;
+      // fetch() throws its own native DOMException on abort, separate from
+      // the reason we passed — match either.
+      // The flag is authoritative — an aborted fetch can reject in several
+      // different shapes depending on where in the chain it was interrupted.
+      if (cancelledRef.current || (err as { name?: string })?.name === "AbortError") return;
       setTurns((prev) => [
         ...prev,
         { role: "assistant", content: `Couldn't reach the API at ${API_URL} (${err instanceof Error ? err.message : "unknown error"}).` },
       ]);
     } finally {
+      inFlightRef.current = null;
       abortRef.current = null;
       setSending(false);
     }
@@ -381,9 +412,16 @@ export default function AgentChatPage() {
                 <div className="h-7 w-7 rounded-full border flex items-center justify-center shrink-0">
                   <Bot className="h-3.5 w-3.5" />
                 </div>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {activity ?? "Thinking"}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
+                    {activity ?? "Thinking"}
+                  </div>
+                  {activityDetail && (
+                    <p className="text-xs text-muted-foreground/60 mt-1 pl-5.5 truncate max-w-xl">
+                      {activityDetail}
+                    </p>
+                  )}
                 </div>
               </div>
             )}
