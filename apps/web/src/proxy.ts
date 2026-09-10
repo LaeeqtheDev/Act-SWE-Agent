@@ -15,7 +15,17 @@ import { isHostedMode } from "@/lib/hosted-mode";
 // first evaluated — which, combined with how Next inlines NEXT_PUBLIC_*
 // vars, meant flipping it in .env didn't actually take effect without a
 // full rebuild. Reading it per-request makes a server restart enough.
-const isProtectedRoute = createRouteMatcher(["/agent(.*)", "/dashboard(.*)", "/workflows(.*)", "/billing(.*)", "/profile(.*)"]);
+// /debug reports which credentials this server has configured — useful
+// during setup, but it must never be readable by an anonymous visitor.
+const isProtectedRoute = createRouteMatcher([
+  "/agent(.*)",
+  "/dashboard(.*)",
+  "/workflows(.*)",
+  "/billing(.*)",
+  "/profile(.*)",
+  "/settings(.*)",
+  "/debug(.*)",
+]);
 
 const hostedProxy = clerkMiddleware(async (auth, req) => {
   if (isProtectedRoute(req)) {

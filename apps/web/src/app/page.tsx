@@ -1,3 +1,4 @@
+"use client"
 import Link from "next/link";
 import { IBM_Plex_Mono, IBM_Plex_Sans } from "next/font/google";
 import {
@@ -34,6 +35,7 @@ import { PipelineScroll } from "@/components/landing/pipeline-scroll";
 import { DemoChat } from "@/components/landing/demo-chat";
 import { AuthNav } from "@/components/auth/auth-nav";
 import { Comparison } from "@/components/landing/comparison";
+import { Roles } from "@/components/landing/roles";
 import { HowItWorks } from "@/components/landing/how-it-works";
 import { FAQ } from "@/components/landing/faq";
 
@@ -158,6 +160,9 @@ export default function LandingPage() {
           </span>
         </div>
         <div className="flex items-center gap-5 text-sm">
+          <Link href="#roles" className="hidden md:inline text-muted-foreground hover:text-foreground transition-colors">
+            Who it&apos;s for
+          </Link>
           <Link href="/case-studies" className="hidden md:inline text-muted-foreground hover:text-foreground transition-colors">
             What it can do
           </Link>
@@ -208,6 +213,25 @@ export default function LandingPage() {
               );
             })}
           </div>
+        </div>
+      </section>
+
+      {/* Who it's for */}
+      <section id="roles" className="border-b border-border bg-card/30">
+        <div className="py-20">
+          <div className="max-w-4xl mx-auto px-6 md:px-8 mb-10">
+            <Reveal>
+              <p style={{ fontFamily: "var(--font-mono)" }} className="text-xs tracking-[0.2em] uppercase text-warn mb-3">
+                Who it&apos;s for
+              </p>
+              <h2 className="text-2xl md:text-3xl font-semibold text-foreground max-w-2xl">
+                Pick your job. See what it does for you.
+              </h2>
+            </Reveal>
+          </div>
+          <Reveal delay={0.1}>
+            <Roles />
+          </Reveal>
         </div>
       </section>
 

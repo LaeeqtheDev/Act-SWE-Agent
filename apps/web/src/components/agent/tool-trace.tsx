@@ -78,6 +78,7 @@ function failed(entry: TraceEntry): boolean {
 // why something failed.
 export function ToolTrace({ entries }: { entries: TraceEntry[] }) {
   const [expanded, setExpanded] = useState<number | null>(null);
+  const [showRaw, setShowRaw] = useState(false);
   const [showAll, setShowAll] = useState(false);
 
   if (entries.length === 0) return null;
@@ -116,25 +117,41 @@ export function ToolTrace({ entries }: { entries: TraceEntry[] }) {
 
             {isOpen && (
               <div className="px-3 pb-3 pt-1 space-y-2">
+                {!showRaw && (
+                  <button
+                    onClick={() => setShowRaw(true)}
+                    className="text-[10px] uppercase tracking-wide text-muted-foreground/50 hover:text-muted-foreground transition-colors"
+                  >
+                    Show technical details
+                  </button>
+                )}
                 {explain(entry) && (
                   <p className={`text-xs ${error ? "text-destructive" : "text-muted-foreground"}`}>
                     {explain(entry)}
                   </p>
                 )}
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">Technical details — what was sent</p>
-                  <pre className="text-[11px] font-mono bg-background/60 rounded p-2 overflow-x-auto text-muted-foreground max-h-32">
-                    {JSON.stringify(entry.input, null, 2)}
-                  </pre>
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">Technical details — what came back</p>
-                  <pre className="text-[11px] font-mono bg-background/60 rounded p-2 overflow-x-auto text-muted-foreground max-h-48">
-                    {typeof entry.output === "string"
-                      ? entry.output.slice(0, 1500)
-                      : JSON.stringify(entry.output, null, 2)?.slice(0, 1500)}
-                  </pre>
-                </div>
+                {showRaw && (
+                  <>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">
+                        Technical details — what was sent
+                      </p>
+                      <pre className="text-[11px] font-mono bg-background/60 rounded p-2 overflow-x-auto text-muted-foreground max-h-32">
+                        {JSON.stringify(entry.input, null, 2)}
+                      </pre>
+                    </div>
+                    <div>
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground/60 mb-1">
+                        Technical details — what came back
+                      </p>
+                      <pre className="text-[11px] font-mono bg-background/60 rounded p-2 overflow-x-auto text-muted-foreground max-h-48">
+                        {typeof entry.output === "string"
+                          ? entry.output.slice(0, 1500)
+                          : JSON.stringify(entry.output, null, 2)?.slice(0, 1500)}
+                      </pre>
+                    </div>
+                  </>
+                )}
               </div>
             )}
           </div>

@@ -354,9 +354,13 @@ export default function AgentChatPage() {
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   Right now it can browse public sites. Point it at your own Chrome profile and it can
                   read your actual inbox, draft replies, and act on any site you&apos;re already signed
-                  into — no passwords, it just uses the session you already have.{" "}
+                  into — no passwords, it just uses the session you already have.
+                </p>
+                <p className="text-xs text-muted-foreground/70 leading-relaxed mt-2">
+                  This is a one-time setting on the computer running Act. If that&apos;s not you, ask
+                  whoever set it up to enable it —{" "}
                   <a href="/docs#your-chrome" className="text-warn hover:underline">
-                    How to set it up
+                    the steps are here
                   </a>
                 </p>
               </div>

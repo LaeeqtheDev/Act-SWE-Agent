@@ -25,9 +25,9 @@ export function HeroSection() {
               Watch it get done.
             </h1>
             <p className="mt-6 text-base md:text-lg text-muted-foreground max-w-lg leading-relaxed">
-              An AI assistant that opens a real browser and actually does things — applies to jobs,
-              clears your inbox, researches and writes it up, books what you need. You watch it work,
-              and nothing gets sent without your say-so.
+              It opens a real browser and does the work — applies to jobs, builds lead lists, clears your
+              inbox, researches and writes it up. Whether you&apos;re job hunting, running a business, or
+              wiring it into your own stack, you watch every step and nothing sends without your say-so.
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-4">
               <Link href="/agent" className="inline-flex items-center gap-2 px-5 py-3 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity">

@@ -302,7 +302,7 @@ async function collectInteractiveElements(p: Page): Promise<InteractiveElement[]
     for (const el of els) {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) continue; // skip hidden elements
-      const label =
+      let label =
         el.getAttribute("aria-label") ||
         (el as HTMLElement).innerText?.trim() ||
         el.textContent?.trim() ||
@@ -342,6 +342,12 @@ async function collectInteractiveElements(p: Page): Promise<InteractiveElement[]
         continue;
       }
 
+      // Playwright NORMALIZES whitespace when matching accessible names, so
+      // a selector built from raw innerText — which on a YouTube result is
+      // "12:56\nNow playing\nCoke Studio..." — can never match anything.
+      // Every click in the trace failed for exactly this reason. Collapse
+      // all whitespace runs to single spaces before building the selector.
+      label = label.replace(/\s+/g, " ").trim();
       const trimmed = label.slice(0, 60);
 
       // The label shown to the model is truncated to 60 chars to keep the

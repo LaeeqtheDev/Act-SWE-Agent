@@ -1,28 +1,32 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, Suspense, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
-import { Check, Plug, Loader2 } from "lucide-react";
+import { Check, Loader2, Search, Plus, X } from "lucide-react";
 import { AppNav } from "@/components/app-nav";
 import { ClerkTokenBridge } from "@/components/auth/clerk-token-bridge";
+import { ServiceIcon } from "@/components/agent/service-icon";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
-interface Connections {
-  connected: { service: string; workspaceName: string | null }[];
-  available: { service: string; label: string }[];
+interface CatalogEntry {
+  service: string;
+  label: string;
+  description: string;
+  category: string;
+  configured: boolean;
+  connected: boolean;
+  workspaceName: string | null;
 }
-
-const DESCRIPTIONS: Record<string, string> = {
-  slack: "Read channels, search messages, and post — with your approval.",
-  notion: "Search and read your pages, and append to them.",
-};
 
 function ConnectionsInner() {
   const params = useSearchParams();
   const [getToken, setGetToken] = useState<(() => Promise<string | null>) | undefined>(undefined);
-  const [data, setData] = useState<Connections | null>(null);
+  const [catalog, setCatalog] = useState<CatalogEntry[]>([]);
+  const [selfHosted, setSelfHosted] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
 
   const justConnected = params.get("connected");
   const workspace = params.get("workspace");
@@ -37,9 +41,15 @@ function ConnectionsInner() {
   async function load() {
     try {
       const res = await fetch(`${API_URL}/connections`, { headers: await authHeaders() });
-      if (res.ok) setData(await res.json());
+      if (res.ok) {
+        const data = await res.json();
+        setCatalog(Array.isArray(data.catalog) ? data.catalog : []);
+        setSelfHosted(!!data.selfHosted);
+      }
     } catch {
-      setData({ connected: [], available: [] });
+      setCatalog([]);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -58,26 +68,54 @@ function ConnectionsInner() {
     setBusy(null);
   }
 
-  const connectedSet = new Set(data?.connected.map((c) => c.service) ?? []);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return catalog;
+    return catalog.filter(
+      (c) => c.label.toLowerCase().includes(q) || c.description.toLowerCase().includes(q) || c.category.toLowerCase().includes(q)
+    );
+  }, [catalog, query]);
+
+  const connected = filtered.filter((c) => c.connected);
+  const categories = useMemo(() => {
+    const groups = new Map<string, CatalogEntry[]>();
+    for (const entry of filtered) {
+      if (entry.connected) continue;
+      const list = groups.get(entry.category) ?? [];
+      list.push(entry);
+      groups.set(entry.category, list);
+    }
+    return [...groups.entries()];
+  }, [filtered]);
 
   return (
     <div className="min-h-screen bg-background">
       <ClerkTokenBridge onReady={(fn) => setGetToken(() => fn)} />
       <AppNav getToken={getToken} />
 
-      <div className="max-w-2xl mx-auto px-6 py-10">
-        <div className="flex items-center gap-2 mb-2">
-          <Plug className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-2xl font-semibold text-foreground">Connections</h1>
+      <div className="max-w-3xl mx-auto px-6 py-10">
+        <div className="flex items-start justify-between gap-6 mb-8">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground mb-1.5">Connections</h1>
+            <p className="text-sm text-muted-foreground max-w-md">
+              Connect an app and the agent can work with it directly. It only ever reads without asking —
+              anything that posts or sends still needs your approval.
+            </p>
+          </div>
+          <div className="relative shrink-0 hidden sm:block">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search"
+              className="w-48 text-sm rounded-md border border-border bg-background pl-8 pr-3 py-2"
+            />
+          </div>
         </div>
-        <p className="text-sm text-muted-foreground mb-8">
-          Connect a service and the agent talks to it directly through its API — much faster and more
-          reliable than driving the web interface. Reading is free; anything that posts still needs your
-          approval.
-        </p>
 
         {justConnected && (
-          <div className="mb-6 p-3 rounded-lg border border-warn/30 bg-warn/[0.06] text-sm text-foreground">
+          <div className="mb-6 p-3 rounded-lg border border-warn/30 bg-warn/[0.06] text-sm text-foreground flex items-center gap-2">
+            <Check className="h-4 w-4 text-warn shrink-0" />
             Connected to {workspace || justConnected}.
           </div>
         )}
@@ -87,57 +125,130 @@ function ConnectionsInner() {
           </div>
         )}
 
-        {data?.available.length === 0 && (
-          <div className="p-4 rounded-lg border border-border text-sm text-muted-foreground">
-            No integrations are configured on this server yet. Set{" "}
-            <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">SLACK_CLIENT_ID</code> or{" "}
-            <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">NOTION_CLIENT_ID</code> in{" "}
-            <code className="text-foreground bg-muted px-1.5 py-0.5 rounded text-xs">apps/api/.env</code> — see the docs
-            for setup.
+        {loading && (
+          <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading
           </div>
         )}
 
-        <div className="space-y-3">
-          {data?.available.map((a) => {
-            const isConnected = connectedSet.has(a.service);
-            const conn = data.connected.find((c) => c.service === a.service);
-
-            return (
-              <div key={a.service} className="p-4 rounded-lg border border-border flex items-center justify-between gap-4">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-sm font-medium text-foreground">{a.label}</p>
-                    {isConnected && <Check className="h-3.5 w-3.5 text-warn" />}
+        {!loading && connected.length > 0 && (
+          <section className="mb-10">
+            <h2 className="text-xs font-medium text-foreground mb-3">Connected</h2>
+            <div className="space-y-2">
+              {connected.map((c) => (
+                <div key={c.service} className="p-3 rounded-lg border border-border flex items-center gap-3">
+                  <ServiceIcon service={c.service} className="h-9 w-9 shrink-0 text-lg" />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <p className="text-sm font-medium text-foreground">{c.label}</p>
+                      <Check className="h-3.5 w-3.5 text-warn" />
+                    </div>
+                    <p className="text-xs text-muted-foreground truncate">
+                      {c.workspaceName || c.description}
+                    </p>
                   </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {isConnected && conn?.workspaceName ? conn.workspaceName : DESCRIPTIONS[a.service]}
-                  </p>
-                </div>
-
-                {isConnected ? (
                   <button
-                    onClick={() => remove(a.service)}
-                    disabled={busy === a.service}
-                    className="text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors shrink-0"
+                    onClick={() => remove(c.service)}
+                    disabled={busy === c.service}
+                    className="shrink-0 text-xs px-3 py-1.5 rounded-md border border-border text-muted-foreground hover:text-destructive hover:border-destructive/40 transition-colors"
                   >
-                    {busy === a.service ? <Loader2 className="h-3 w-3 animate-spin" /> : "Disconnect"}
+                    {busy === c.service ? <Loader2 className="h-3 w-3 animate-spin" /> : "Disconnect"}
                   </button>
-                ) : (
-                  <a
-                    href={`${API_URL}/connections/${a.service}/start`}
-                    className="text-xs px-3 py-1.5 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90 transition-opacity shrink-0"
-                  >
-                    Connect
-                  </a>
-                )}
-              </div>
-            );
-          })}
-        </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
-        <p className="text-xs text-muted-foreground/70 mt-8">
-          Tokens are encrypted before storage and never shown again. Disconnecting deletes them — you can
-          also revoke access from within Slack or Notion directly.
+        {!loading &&
+          categories.map(([category, entries]) => (
+            <section key={category} className="mb-8">
+              <h2 className="text-xs font-medium text-foreground mb-3">{category}</h2>
+              <div className="grid sm:grid-cols-2 gap-2">
+                {entries.map((c) => (
+                  <div
+                    key={c.service}
+                    className="p-3 rounded-lg border border-border flex items-center gap-3 hover:border-foreground/20 transition-colors"
+                  >
+                    <ServiceIcon service={c.service} className="h-9 w-9 shrink-0 text-lg" />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-medium text-foreground">{c.label}</p>
+                      <p className="text-xs text-muted-foreground line-clamp-1">{c.description}</p>
+                    </div>
+
+                    {c.configured ? (
+                      // A plain link, not a fetch — OAuth needs a real
+                      // top-level navigation to the provider's consent page.
+                      <a
+                        href={`${API_URL}/connections/${c.service}/start`}
+                        title={`Connect ${c.label}`}
+                        className="shrink-0 h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                      >
+                        <Plus className="h-4 w-4" />
+                      </a>
+                    ) : (
+                      // Deliberately does NOT tell the end user to edit a
+                      // .env file — that's the operator's job. They just
+                      // see that it isn't available here yet.
+                      <span
+                        title={
+                          selfHosted
+                            ? `Register an app with ${c.label} and add its client ID and secret to apps/api/.env`
+                            : "Not enabled on this server yet"
+                        }
+                        className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground/50 px-2"
+                      >
+                        {selfHosted ? "Set up" : "Soon"}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+
+        {!loading && filtered.length === 0 && (
+          <div className="py-12 text-center">
+            <X className="h-5 w-5 text-muted-foreground/40 mx-auto mb-2" />
+            <p className="text-sm text-muted-foreground">Nothing matches &ldquo;{query}&rdquo;.</p>
+          </div>
+        )}
+
+        {selfHosted && catalog.some((c) => !c.configured) && (
+          <div className="mt-8 p-4 rounded-lg border border-border bg-card/50">
+            <p className="text-sm text-foreground font-medium mb-2">Enabling the rest</p>
+            <p className="text-xs text-muted-foreground leading-relaxed mb-3">
+              You&apos;re running this yourself, so these need a one-time setup — register an app with the
+              provider, then add its credentials. Every user of this server can then connect with one
+              click; they never see any of this.
+            </p>
+            <ol className="text-xs text-muted-foreground space-y-1.5 list-decimal list-inside">
+              <li>
+                Slack: <span className="text-foreground">api.slack.com/apps</span> &rarr; Create App &rarr;
+                OAuth &amp; Permissions. Notion: <span className="text-foreground">notion.so/my-integrations</span>{" "}
+                &rarr; New integration &rarr; type &ldquo;Public&rdquo;.
+              </li>
+              <li>
+                Set the redirect URL to{" "}
+                <code className="text-foreground bg-muted px-1 py-0.5 rounded">
+                  {API_URL}/connections/&lt;service&gt;/callback
+                </code>
+              </li>
+              <li>
+                Put the client ID and secret in{" "}
+                <code className="text-foreground bg-muted px-1 py-0.5 rounded">apps/api/.env</code> as{" "}
+                <code className="text-foreground bg-muted px-1 py-0.5 rounded">SLACK_CLIENT_ID</code> /{" "}
+                <code className="text-foreground bg-muted px-1 py-0.5 rounded">SLACK_CLIENT_SECRET</code>,
+                then restart the API.
+              </li>
+            </ol>
+          </div>
+        )}
+
+        <p className="text-xs text-muted-foreground/60 mt-10 pt-6 border-t border-border">
+          Connecting opens that app&apos;s own sign-in page — we never see your password. Access tokens are
+          encrypted before storage, and disconnecting deletes them. You can also revoke access from within
+          the app itself at any time.
         </p>
       </div>
     </div>
@@ -145,7 +256,6 @@ function ConnectionsInner() {
 }
 
 export default function ConnectionsPage() {
-  // useSearchParams needs a Suspense boundary in the app router.
   return (
     <Suspense fallback={null}>
       <ConnectionsInner />

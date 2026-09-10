@@ -942,6 +942,21 @@ const server = app.listen(PORT, () => {
   // because .env is copied once and then drifts from .env.example.
   const visible = process.env.BROWSER_HEADLESS === "false";
   const profile = !!process.env.CHROME_USER_DATA_DIR;
+  // Integration setup is an OPERATOR concern, so it belongs in the server
+  // log — not in the end user's connections page, where it was previously
+  // telling non-technical people to edit .env files.
+  const integrations = [
+    ["Slack", process.env.SLACK_CLIENT_ID],
+    ["Notion", process.env.NOTION_CLIENT_ID],
+  ] as const;
+  const missing = integrations.filter(([, id]) => !id).map(([name]) => name);
+  if (missing.length > 0) {
+    console.log(
+      `[integrations] Not set up: ${missing.join(", ")}. Users see these as "Soon" in Connections. ` +
+        "To enable, register the app with the provider and set its CLIENT_ID/CLIENT_SECRET in apps/api/.env — see docs/HOSTING.md."
+    );
+  }
+
   console.log(
     `[browser] visible window: ${visible ? "ON" : "OFF (set BROWSER_HEADLESS=\"false\" to watch it work)"} | ` +
       `your Chrome profile: ${profile ? "ON" : "OFF (set CHROME_USER_DATA_DIR for logged-in sites + fewer CAPTCHAs)"}`

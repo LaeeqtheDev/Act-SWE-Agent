@@ -85,6 +85,18 @@ describe("interactive element collection (real shipped logic)", () => {
     expect(field!.selector).not.toContain("textbox");
   });
 
+  it("collapses newlines in labels — Playwright normalizes accessible names", () => {
+    // Straight from a failing trace: a YouTube result link's innerText is
+    // "12:56\nNow playing\nCoke Studio...". Building a selector from that
+    // raw string produced role=link[name=/12:56\nNow playing/i], which can
+    // NEVER match, because Playwright normalizes whitespace in accessible
+    // names. Every click on a video result failed for this reason.
+    render(`<a href="https://youtube.com/watch?v=x">12:56\n\nNow playing\nPiya Ghar Aaya</a>`);
+    const link = collect()[0];
+    expect(link.selector).not.toContain("\n");
+    expect(link.text).not.toContain("\n");
+  });
+
   it("skips hidden inputs and checkboxes that have no label", () => {
     render(`<input type="hidden" /><input type="checkbox" />`);
     expect(collect()).toHaveLength(0);

@@ -48,6 +48,20 @@ export function ClerkProviderIfHosted({ children }: { children: ReactNode }) {
           },
           footerActionLink: { color: "#E0A850", "&:hover": { color: "#EBB65E" } },
           identityPreviewEditButton: { color: "#E0A850" },
+          // The account dropdown was rendering dark-on-dark and was
+          // effectively unreadable — Clerk's popover defaults assume a
+          // light surface, and only the modal was themed before.
+          userButtonPopoverCard: { backgroundColor: "#1A1A1C", border: "1px solid #2F2F36" },
+          userButtonPopoverMain: { backgroundColor: "#1A1A1C" },
+          userButtonPopoverActionButton: {
+            color: "#E4E5E7",
+            "&:hover": { backgroundColor: "#26262B", color: "#FFFFFF" },
+          },
+          userButtonPopoverActionButtonText: { color: "#E4E5E7" },
+          userButtonPopoverActionButtonIcon: { color: "#9A9AA2" },
+          userButtonPopoverFooter: { background: "transparent" },
+          userPreviewMainIdentifier: { color: "#F2F3F5" },
+          userPreviewSecondaryIdentifier: { color: "#9A9AA2" },
         },
       }}
     >

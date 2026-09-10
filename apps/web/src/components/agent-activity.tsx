@@ -42,6 +42,10 @@ export function AgentActivity({ apiUrl }: { apiUrl: string }) {
 
   useEffect(() => {
     load();
+    // The agent works in the background — a page that only updates on
+    // manual refresh makes it look like nothing is happening.
+    const poll = setInterval(load, 5000);
+    return () => clearInterval(poll);
   }, []);
 
   async function act(id: string, decision: "approve" | "reject") {

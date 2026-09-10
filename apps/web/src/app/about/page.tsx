@@ -60,6 +60,20 @@ export default function AboutPage() {
       </div>
 
       <div className="mt-16 space-y-5 text-[15px] text-muted-foreground leading-relaxed max-w-2xl">
+        <h2 className="text-xl font-medium text-foreground">Built for two kinds of people</h2>
+        <p>
+          If you don&apos;t write code, you never have to. Sign in, describe what you want in plain
+          language, and watch it happen in a browser window — no setup, no configuration, no prompt
+          engineering.
+        </p>
+        <p>
+          If you do, the whole thing is yours: any model you like (including a local one), a documented
+          tool interface where adding a capability is one file, and an approval layer with a single
+          audit point. Fork it and it&apos;s a platform, not a product you rent.
+        </p>
+      </div>
+
+      <div className="mt-16 space-y-5 text-[15px] text-muted-foreground leading-relaxed max-w-2xl">
         <h2 className="text-xl font-medium text-foreground">Why it&apos;s free to run yourself</h2>
         <p>
           The entire thing is open source. You can download it, run it on your own computer, and never

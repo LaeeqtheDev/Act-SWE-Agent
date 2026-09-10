@@ -189,16 +189,58 @@ export async function getToken(service: Service, userId?: string): Promise<strin
   }
 }
 
+// The user-facing catalog. Everything here is shown in the directory —
+// including services this deployment hasn't set up yet, marked as
+// unavailable rather than hidden. Hiding them made the page look empty and
+// broken; telling an end user to edit SLACK_CLIENT_ID in a .env file is
+// worse, since that's the operator's job, not theirs.
+export const CATALOG: {
+  service: Service;
+  label: string;
+  description: string;
+  category: string;
+}[] = [
+  {
+    service: "slack",
+    label: "Slack",
+    description: "Read channels, search messages, and post with your approval.",
+    category: "Communication",
+  },
+  {
+    service: "notion",
+    label: "Notion",
+    description: "Search and read your pages, and add to them.",
+    category: "Docs & notes",
+  },
+];
+
 export async function listConnections(userId?: string) {
   const rows = await prisma.connection.findMany({
     where: { userId: userId ?? null },
     select: { service: true, workspaceName: true, createdAt: true },
   });
+
+  const connectedSet = new Set(rows.map((r: { service: string }) => r.service));
+
   return {
     connected: rows,
-    available: (["slack", "notion"] as Service[])
-      .filter((s) => isConfigured(s))
-      .map((s) => ({ service: s, label: configFor(s).label })),
+    // Every catalog entry, each carrying its own state — so the UI can
+    // render a real directory instead of an empty list plus setup docs.
+    catalog: CATALOG.map((entry) => ({
+      ...entry,
+      configured: isConfigured(entry.service),
+      connected: connectedSet.has(entry.service),
+      workspaceName: rows.find((r: { service: string; workspaceName: string | null }) => r.service === entry.service)?.workspaceName ?? null,
+    })),
+    // Self-hosters ARE the operator, so they should see how to enable an
+    // integration rather than a dead "Soon" badge. Hosted users can't act
+    // on it, so they don't get it.
+    selfHosted: process.env.HOSTED_MODE !== "true",
+    // Kept for the chat loop, which only cares which tools to offer.
+    available: CATALOG.filter((e) => isConfigured(e.service)).map((e) => ({
+      service: e.service,
+      label: e.label,
+    })),
   };
 }
 
