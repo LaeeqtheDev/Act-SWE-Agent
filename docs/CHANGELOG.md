@@ -2458,3 +2458,593 @@ test suite that had encoded the old, broken assumption ("recent = kept
 intact, no matter how large") as the expected behavior.
 
 52 tests passing (was 51).
+
+---
+
+## 68. Element IDs replace selectors — the actual architectural fix
+
+A review of the recurring click/type failures named the real problem: every
+bug so far (whitespace breaking role= matching, a field's label matching an
+unrelated element, wrong ARIA roles, truncated names, drifting hrefs) was a
+different symptom of the same root cause — **the model had to construct a
+Playwright selector string from element text, and every construction method
+had its own way to fail.**
+
+**The fix:** `collectInteractiveElements` now stamps a stable `data-act-id`
+attribute directly onto each qualifying DOM element during collection. The
+model sees `{id: "e3", text: "...", href: "..."}` and sends the id straight
+back — it never builds, guesses, or reasons about a selector at all.
+Resolution happens server-side via `[data-act-id="..."]`, which either
+matches or it doesn't. There is no longer a class of selector bugs to have.
+
+**Built-in verification, not an optional tool call.** `clickToNavigate` now
+captures the URL before and after every click and reports what actually
+happened — navigated, or didn't. Previously "click succeeded" and "click
+did something useless" looked identical to the agent; now they're
+distinguishable without it remembering to call `verifyPageContains`.
+
+**Stale-id handling instead of silent mismatch.** If an id from a previous
+page read no longer resolves (the page navigated since, ids are
+per-snapshot), every action function reports that explicitly — "isn't on
+the current page, likely stale" — rather than a raw Playwright timeout with
+no explanation. `performFormFill` reports exactly which fields were skipped
+for this reason, instead of failing the whole form silently.
+
+**Updated throughout:** tool schemas, the system prompt, `agent.ts`'s
+approved-action execution (payload types flow through unchanged, since the
+type definitions carry the new shape), and the UI's error-summarization and
+progress-detail extraction.
+
+**Tests rewritten, not just left passing.** `dom-collection.test.ts` now
+verifies the actual mechanism — that a returned id corresponds to a real
+`data-act-id` attribute on the DOM element, that no selector field exists
+anywhere in the output, and that two elements with unrelated text can never
+collide on the same id (the exact shape of the Google search-box bug).
+
+72 tests passing (was 71).
+
+---
+
+## 69. Generation-scoped ids and structured failure classification
+
+Two of the six follow-up recommendations from the same review, implemented
+this round.
+
+**Ids are now scoped to a page generation, not just unique on one page.**
+The narrow gap the review named: `e0` on page A and `e0` on page B (after a
+navigation, or even just a React rerender) could theoretically both exist,
+so an id alone didn't encode which page state it came from. Every
+`collectInteractiveElements` call now advances a per-page generation
+counter, and every id it returns embeds that generation — `"4:e3"` — with
+the exact same string stamped as the DOM attribute. A generation only ever
+increases, so an id from generation 4 is **provably** stale once generation
+5 exists, not inferred from a missing-element timeout. This makes stale-id
+detection structural rather than best-effort.
+
+**Failures are now classified, not just described.** Every action function
+(`clickToNavigate`, `typeInto`, `performBrowserAction`, `performFormFill`)
+returns a `failureReason` — `STALE_ELEMENT`, `ELEMENT_NOT_FOUND`,
+`NAVIGATION_TIMEOUT`, or `VERIFICATION_FAILED` — alongside its error
+message. The system prompt now tells the agent to react differently per
+reason: re-read the page on `STALE_ELEMENT`, don't retry a hallucinated id
+on `ELEMENT_NOT_FOUND`, wait once on `NAVIGATION_TIMEOUT`. Previously every
+failure was the same generic string, and the only available response was
+"try again," which is exactly the blind-retry pattern the review flagged.
+
+Also fixed a leftover fragment from an earlier edit — two sentences of
+prompt guidance had been orphaned mid-paragraph by a prior replacement and
+were no longer attached to the rule they were meant to qualify.
+
+**Test coverage added for the actual mechanism**, not just the classifier
+function: `dom-collection.test.ts` now asserts ids match the
+`{generation}:e{n}` shape, and `element-staleness.test.ts` covers all four
+cases the review specifically named — an old-generation id, a
+well-formed-but-never-real id, a malformed id, and a current-generation id
+that must never be misclassified as stale.
+
+76 tests passing (was 72).
+
+### Still open from the same review, deliberately not rushed this round
+
+- **Task-specific verification** — URL-change is still the only signal
+  `clickToNavigate` checks; the review's fuller proposal (title similarity,
+  player-visible checks, form-field-value checks) needs per-task-type
+  verification logic, not a quick addition.
+- **Idempotency keys on write actions** — retrying an approved action after
+  a timeout could still double-submit. Needs its own design pass around
+  `AgentAction`'s status transitions, not a bolt-on.
+- **The observability/tracing layer** — `run_id`, `step_id`,
+  `verification_status`, `retry_count` as a queryable structured log. Real
+  scope, deserves its own pass.
+- **DOM-mutation test matrix** — React rerenders, SPA navigation, modals,
+  infinite scroll, iframes, disabled elements, colliding text. The
+  generation mechanism above should handle most of these correctly, but
+  "should" isn't "tested," and the review is right to call that out
+  specifically.
+
+---
+
+## 70. Verification Engine v1
+
+The scoped ticket from the review: a small, runtime-owned verification
+layer, not a framework. The distinction it exists to make — "the action
+executed" is not the same question as "the action achieved what was
+asked" — was previously answered inconsistently by ad-hoc checks scattered
+across three different functions. Now there's one module they all use.
+
+**`tools/verification.ts`** — a `VerificationResult` type and four
+verifiers, each answering exactly one question:
+- `verifyUrl` — does the current URL contain an expected substring
+- `verifyTextPresent` — is text present on the page (checked in both
+  rendered content and form field values, since typed text lives in
+  `element.value` and never appears in `innerText`)
+- `verifyElementVisible` — is a given element id actually visible right now
+- `verifyInputValue` — does a field's value contain what was supposed to be
+  typed into it
+
+A single `verifyAction(page, expected)` dispatcher routes to the right one.
+Deliberately excluded, exactly as scoped: title-similarity scoring,
+screenshots, LLM-based judging, and any path that lets the model write its
+own verification logic. The runtime decides how a check is performed; the
+model only ever chooses what to check.
+
+**Integrated into the actions that already existed, not bolted on
+separately.** `typeInto` and `performFormFill` now call `verifyInputValue`
+as their real implementation — this was previously duplicated inline logic
+in each function; it's now one function two call sites both use.
+`clickToNavigate` accepts an optional `expectedOutcome` and, when the
+caller supplies one, resolves success from real verification instead of the
+weaker "did the URL change" heuristic (which is kept as the sensible
+default when no explicit expectation is given, since requiring one for
+every navigation click would be more machinery than most tasks need).
+
+**Caught a real, separate bug while writing the tests for
+`verifyTextPresent`.** It checked `document.body.innerText` with no
+fallback — the exact same layout-dependent-emptiness bug fixed in
+`collectInteractiveElements` several rounds ago, just never fixed here
+since it's a different function. `textContent` fallback added, and the same
+fix applied to the older `verifyPageContains` tool, which had the identical
+gap.
+
+92 tests passing (was 76) — 16 new tests against the actual exported
+verifier functions, wired to a real jsdom document through a minimal fake
+`Page` (Playwright can't run in this sandbox), covering every verifier, the
+dispatcher, and the exact failure shapes named in the review: still on a
+results page instead of `/watch`, a field showing unrelated content from a
+reset controlled input, an empty field after typing.
+
+### Still open, per the agreed progression
+
+Observability/tracing, idempotency keys on write actions, and the DOM-
+mutation test matrix (React rerenders, modals, infinite scroll, iframes) —
+unchanged from the prior round, in that order.
+
+---
+
+## 71. Observability v1 — a structured event log, not a pretty-log illusion
+
+The scoped ticket: events are the source of truth, the human-readable
+timeline is only ever rendered from them, never the other way around. No
+Grafana, no Prometheus, no OpenTelemetry — an internal trace, done
+properly, first.
+
+**`AgentRun` / `RunEvent`** — one row per invocation (a chat turn or a
+workflow run), with a typed event stream: `RUN_STARTED`, `AGENT_STEP`,
+`TOOL_STARTED`, `TOOL_COMPLETED`, `VERIFICATION`, `APPROVAL`, `RETRY`,
+`RUN_COMPLETED`, `RUN_FAILED`. Every write is best-effort — observability
+must never slow down or break the work it's observing, so a failed event
+write is logged and swallowed, never thrown.
+
+**`runs.ts`** — `startRun`, `recordEvent`, `completeRun`, and
+`formatTimeline`, the last one deliberately pure (no DB, no I/O) so it's
+directly testable against a hand-built event list rather than only through
+a live database.
+
+**Instrumented at every point the ticket named:**
+- Agent lifecycle — a run starts the moment `runAgentLoop` begins, and
+  completes (or fails) at every one of its three exit paths, including
+  cancellation
+- Each model call — timed, emitted as `AGENT_STEP`
+- Each tool call — `TOOL_STARTED` before, `TOOL_COMPLETED` after with
+  duration, status, and `failureReason` when the tool returned one (#69)
+- Verification — any tool result carrying a `verificationResult` (#70)
+  surfaces as its own `VERIFICATION` event, because "the click executed"
+  and "the click achieved what was asked" are still deliberately different
+  questions with different answers
+- Retries — both existing retry paths (the 413 history-compaction fallback,
+  the leaked-JSON self-correction) now emit a labelled `RETRY` event instead
+  of retrying silently
+- Approval — `proposeAction`'s own output is the "approval required"
+  moment; the later, separate approve request looks up the most recent run
+  for that conversation and records "HUMAN APPROVED" against it, since
+  approval genuinely happens as its own request well after the proposing
+  run has already completed
+
+**`GET /runs/:id`** returns both the raw event list and the pre-rendered
+timeline.
+
+13 new tests against `formatTimeline` directly, including one that renders
+the full worked example from the review's own trace and checks every event
+type appears in order. 105 tests passing (was 92).
+
+### Unchanged from the prior round, still deliberately not started
+
+Idempotency keys on write actions, and the DOM-mutation test matrix. Same
+order as before: idempotency next, torture testing after.
+
+---
+
+## 72. Idempotent Actions v1
+
+The scoped ticket: distinguish safe-to-retry from needs-verification from
+needs-human, never pretend every external write can be made perfectly
+idempotent when it's YouTube, Gmail, or a booking site on the other end.
+
+### A real bug found while reading the code, before writing anything new
+
+`finish()` set every action's status to `"completed"` regardless of whether
+`result.success` was true or false — a failed browser action, a failed
+Slack post, all recorded identically to a successful one. There was no way
+to tell "this write actually happened" from "this write was attempted and
+failed" by looking at the stored status, which made the whole idempotency
+question unanswerable before any of this ticket's work began. Separately,
+one code path wrote to `AgentAction.result`, a field that **does not exist
+in the schema** — invisible here because this sandbox has never run
+`prisma generate` against the real schema, the same class of gap that
+surfaced the missing `userId` field several rounds ago.
+
+### The state machine
+
+```
+pending -> approved -> executing -> succeeded
+                                  \-> failed -> approved (retry, SAME id)
+                                  \-> unknown
+pending -> rejected
+pending -> expired
+```
+
+`UNKNOWN` is the state that didn't exist before. A crash or network timeout
+between "the write reached the site" and "we recorded that" must not
+collapse into either `FAILED` (a retry could duplicate a real submission)
+or `SUCCEEDED` (could silently skip a write that never happened). Nothing
+in the system retries an `UNKNOWN` action automatically — it sits there
+until something verifies which outcome actually occurred.
+
+**`action-lifecycle.ts`** — pure functions (`canExecute`, `canRetry`,
+`isTerminal`, `isApprovalExpired`, `isExecutionStuck`,
+`nextStatusAfterExecution`, `explainRefusal`), no DB, fully testable
+against nothing but the type itself.
+
+**The atomic claim** — `performAction` no longer just checks status and
+proceeds. It runs `agentAction.updateMany({ where: { id, status:
+"approved" }, ... })` and checks the returned count. Postgres commits that
+conditional update atomically, so two requests racing on the same action id
+— a genuine double-click, or a duplicate job delivered twice by a queue —
+can never both get `count: 1`. Exactly one wins; the other is refused with
+`explainRefusal`, never silently allowed through.
+
+**Crash recovery** — a row stuck in `executing` longer than 5 minutes is
+reclassified to `unknown` the next time anything touches it, rather than
+either blocking forever or being silently re-executed. This is the exact
+scenario from the ticket: worker claims the action, the external write may
+have succeeded, the worker dies before recording it, the worker (or a
+replacement) restarts. The restarted process does **not** find an
+`approved` row it can just run again — it finds `unknown`, refuses, and
+requires verification.
+
+**`retryAction`** — only ever callable on `failed`. Transitions back to
+`approved` and calls `performAction` on the **same row**, never creating a
+new one, which is what lets attempt 2 be recognised as the same logical
+action rather than an unrelated one the system can't connect to the first.
+
+**Approval expiry** — a `pending` action older than 24 hours is marked
+`expired` on the next approve attempt rather than staying approvable
+indefinitely.
+
+### Tests: 27 new (15 pure state-machine, 12 against a mocked Prisma client)
+
+The mocked-Prisma tests exercise `performAction`/`retryAction` for real,
+not a reimplementation — same pattern as `usage.test.ts`. Covering, by
+name, the ticket's own list: an already-`succeeded` action refuses to
+execute again; a second concurrent call cannot claim a row the first
+already claimed (asserting the `updateMany` was even attempted with the
+right status filter, not just that the result was refused); a long-stuck
+`executing` row is reclassified to `unknown` and that reclassification is
+actually persisted, not just reasoned about in memory; a *recently* claimed
+row is correctly left alone rather than reclassified; `unknown` and
+`succeeded` both refuse retry; a `failed` action retries successfully and
+every update along the way references the original `actionId` — asserted
+directly against the mock's call history, not just that the end state was
+correct, since "never creates a new row" is exactly the thing that
+silently drifting could get wrong.
+
+132 tests passing (was 105).
+
+### What's deliberately still open
+
+DOM-mutation torture testing and real-world adversarial testing — exactly
+what comes next, per the plan: browser rerenders, SPA navigation mid-flow,
+duplicate submissions, login expiry, CAPTCHA, network timeouts, interrupted
+workers. Then, and only then, OTel/Prometheus/Grafana as an export problem
+layered on top of the internal tracing that already exists, not another
+architectural experiment.
+
+---
+
+## 73. Reliability torture pass — two real bugs found, not just more tests
+
+The point of this round was explicitly not to add architecture — it was to
+try to break what's already built. It worked: two genuine bugs turned up.
+
+### Real bug #1: the approve route could un-reject a rejected action
+
+`POST /actions/:id/approve` read the action, then unconditionally set
+`status: "approved"` — no check against what the row's status actually was.
+A stray or replayed approve call on an already-`rejected`,
+already-`succeeded`, or currently-`executing` action would silently flip it
+back to `approved`, making it eligible to execute again. This is exactly
+the approval-double-click scenario the torture pass targeted, and it
+surfaced a bug one level up from where the atomic claim already protects —
+`performAction`'s own claim was safe, but the route calling it wasn't
+gated at all.
+
+Fixed with the identical mechanism used in `performAction`: `updateMany`
+conditioned on `status: "pending"`, checked by count. A double-click on
+approve now genuinely has only one winner, and a stray approve on a
+terminal action is refused with a clear reason instead of silently
+resurrecting it.
+
+### Real bug #2: no rule anywhere for genuine ambiguity
+
+The prompt had zero guidance for "open the first one" (first of what?),
+"send this" (to whom?), "use the previous result" (which one?) — requests
+where the needed context genuinely isn't available. Nothing distinguished
+a request worth asking a clarifying question about from an ordinary
+judgment call the agent should just make. Added as rule 9, with the actual
+test: would a reasonable person need to ask this too?
+
+### What was torture-tested and held
+
+**DOM mutation (6 new tests, against the real `collectInteractiveElements`
+via jsdom):** a full React-style rerender, SPA-style content replacement,
+an element removed entirely, a modal opening on top of existing content,
+and search results reordering — in every case, a stale generation-scoped id
+provably does not exist on the mutated DOM, and surviving elements get
+fresh ids rather than inheriting old ones by position. The canonical
+YouTube scenario (wrong candidate, verification fails, reread, correct
+candidate, verification succeeds) is now a literal test against the real
+`verifyUrl`/`verifyAction` functions.
+
+**Concurrency (2 new tests, stateful mock):** ten simultaneous
+`performAction` calls on the same action — exactly one claims and executes,
+the other nine are refused, proven against a mock that behaves the way
+Postgres actually does under a conditional update, not a fixed mock that
+would have hidden this exact class of bug.
+
+**Network/crash honesty (2 new tests):** a thrown exception mid-execution
+— standing in for a network drop, a timeout, anything that interrupts
+after the external write may have already happened — is recorded as
+`unknown`, explicitly never `failed`, and an `unknown` action is confirmed
+to never be automatically retried by anything in the flow.
+
+### What this pass could not directly test, stated plainly
+
+No live browser, no live model — this sandbox cannot run Playwright or
+call a real AI provider. The DOM-mutation and verification tests exercise
+the real shipped logic against jsdom and hand-built fake pages, which is
+real coverage of the decision logic, but it is not the same as watching an
+actual browser survive an actual React rerender mid-click. Login-wall
+detection (distinct from the CAPTCHA detection that already exists and
+already escalates correctly) was identified as a gap but not built this
+round — a 401/paywall page isn't currently distinguished from ordinary
+content the way a CAPTCHA page is.
+
+### Scorecard, honestly
+
+Of what could actually be exercised in this environment: 2 real bugs
+found and fixed, 0 tests written to describe behavior that turned out not
+to exist, 1 gap (login-wall escalation) identified and left explicitly
+open rather than quietly built partway. That ratio — bugs found over
+tests added — is the number that matters this round, not the total test
+count.
+
+141 tests passing (was 132).
+
+---
+
+## 74. The generation bump was invalidating ids mid-task
+
+Live testing surfaced a real bug that none of the existing tests caught,
+because every test collected elements once and then acted — never the
+sequence that actually breaks.
+
+**What was observed:** the agent opened YouTube, typed "tum mile" into the
+search box correctly, and then stalled at "Thinking · step 4" without ever
+pressing Enter. Plus general, severe slowness.
+
+**The cause:** `collectInteractiveElements` bumped the page generation on
+EVERY call, and `typeInto` re-collects to return fresh elements. So typing
+into a search box renumbered every other element on the page — including
+the search button and the search box itself, which the model was about to
+use next. Those ids became `STALE_ELEMENT`, the model re-read the page,
+tried again, and looped. The generation mechanism added in #69 to prevent
+stale ids from resolving was, in this path, *creating* staleness out of
+nothing.
+
+**The fix:** the generation only bumps when the page genuinely navigated.
+`browseWeb` and `goBack` always bump (a real navigation — old ids must
+die). `clickToNavigate` and `pressKey` compare the URL before and after and
+bump only if it actually changed — a click that opens a menu, or an Enter
+that filters in place, leaves every other element exactly where it was and
+must not renumber them. `typeInto` never bumps: typing changes a value, not
+any element's identity.
+
+This also removes a large chunk of the slowness — every spurious
+invalidation cost a re-read, a model turn, and a retry.
+
+**Two tests added** covering both directions, because getting this wrong in
+either one is a bug: a non-navigating action must preserve existing ids,
+and a real navigation must still invalidate them.
+
+143 tests passing (was 141).
+
+### Still open from live testing, not yet diagnosed
+
+Two behaviours reported that I could not reproduce or confirm the cause of
+from the code alone, and won't guess at:
+- A cancelled task appearing to continue in a *new* conversation. Sessions
+  are keyed per conversation and cancellation closes the browser, so the
+  mechanism isn't obvious from reading it — this needs a live repro with
+  the server log to say anything honest.
+- `Connection error` from the provider, and one `Failed to fetch` against
+  the API itself. Both suggest the API process died or was restarting
+  rather than an agent-logic fault, but I have no evidence either way yet.
+
+---
+
+## 75. Element ids were bound to collection ORDER, not to the element
+
+A review challenged whether #74's fix was complete, and it wasn't. Keeping
+the generation stable guarantees ids don't get *invalidated*; it does not
+guarantee `4:e1` still means the same DOM node. Those are two separate
+requirements, and only the first was met.
+
+**The bug:** `collectInteractiveElements` assigned
+`` `${generation}:e${counter++}` `` unconditionally on every pass —
+overwriting any existing attribute. So the id tracked an element's POSITION
+in the collection, not its identity. Anything inserted mid-page (a
+lazily-loaded ad, a toast, a newly-rendered result) shifted every
+subsequent element's id by one.
+
+**Why that's worse than a stale id.** A stale id fails loudly:
+`STALE_ELEMENT`, the agent re-reads and recovers. A *shifted* id resolves
+perfectly — to the wrong element. The runtime reports "element found,
+click succeeded, verification passed" while having clicked something else
+entirely. Silent wrong-element execution is the one failure mode none of
+the machinery built over the last several rounds could catch, because
+every layer of it was working correctly on the wrong target.
+
+**The fix:** an element's id is now assigned once and reused. A node that
+already carries a `data-act-id` at the current generation keeps it; only
+genuinely new nodes get a fresh one. The generation prefix still handles
+navigation, where the document is replaced and every old id *should* stop
+resolving.
+
+**Second bug found while fixing the first:** `counter` restarted at 0 on
+every collection, so a newly-inserted element could be handed an id a
+retained element was still using — reintroducing the same
+wrong-element-execution problem through a different door. The counter now
+starts past the highest id already issued at that generation.
+
+**Tests (5 new), written to the scenarios the review specified:**
+insertion mid-page must not shift existing ids; reordering nodes must not
+change them; collecting twice on an unchanged DOM must be byte-identical;
+and a removed element's id must never be recycled onto a different
+element, with uniqueness asserted across the whole page.
+
+**Plus a regression proof.** A passing test says nothing unless it would
+have failed before. `_regression-proof.test.ts` reimplements the old
+index-derived assignment and asserts it fails the ad-insertion case —
+confirming the id the model held for "Submit" resolved to "Sponsored"
+after insertion. The new tests catch a real bug, not a hypothetical one.
+
+148 tests passing (was 143).
+
+---
+
+## 76. Live Torture Pass — a real, code-level audit, with an honest boundary
+
+Stated plainly first: this environment has no live browser (Playwright
+can't download here) and no live model to call. Items requiring a running
+app couldn't be executed the way the ticket asked. What follows is exactly
+what could and couldn't be done, with no fabricated results.
+
+### 1. Same-session correctness — audited every call site, no leak found
+
+Traced every browser tool call from `tools/index.ts`, `agent.ts`, and
+`chat.ts`'s cancellation listeners: all 7+8 call sites correctly pass
+`conversationId` as the session key. None fall through to the shared
+`"default"` session, which is the only way two conversations could
+actually collide.
+
+5 new tests (`session-isolation.test.ts`) prove this at the state layer —
+cancelling Chat A never marks Chat B cancelled, in either order, and
+clearing one never clears the other. This is real coverage of the
+code-level guarantee. It does **not** prove two live browser *windows*
+stay independent in an actual run — that needs a real browser, which this
+environment cannot provide.
+
+### 2. Cancellation correctness — a precise, honest answer per checkpoint
+
+**Model call:** genuinely abortable mid-flight — the `AbortSignal` reaches
+the actual `fetch` call (`providers/openai-compatible.ts:64`).
+
+**Tool calls (navigation, typing, click):** checked **once, at entry**,
+before dispatch (`tools/index.ts:453`) — not during the Playwright
+operation itself, because `locator.click()`/`page.goto()` don't accept an
+`AbortSignal` at all. An *already-running* browser operation isn't
+interrupted by that check directly.
+
+What actually stops it: the abort listener in `chat.ts` fires
+`closeSession()` the instant `abort()` is called, tearing down the browser
+context out from under any in-flight operation. Playwright rejects the
+pending call with a context-closed error. Confirmed this degrades safely
+rather than crashing — all 6 `collectInteractiveElements(...).catch(() =>
+[])` recovery branches turn that into a normal failed result, not an
+uncaught exception, so the loop's next checkpoint correctly returns
+"Stopped." The real, minor cost: one extra failed-tool round-trip logged
+in the trace before that happens, not an instant hard stop. Worth knowing,
+not worth rearchitecting for.
+
+**Approval wait / retry:** already covered by #72's atomic-claim work — a
+cancelled conversation's pending action is refused via
+`isSessionCancelled`, and neither existing retry path (413 fallback,
+leaked-JSON correction) runs after a cancellation check.
+
+### 3. Speed — structural analysis, not measurement
+
+No live run exists to measure. What's verifiable by reading the code: every
+fixed delay in the `browseWeb → typeInto → pressKey` path
+(`waitForTimeout` calls, `waitForLoadState` caps, interpolated mouse
+movement at 8ms/step) sums to low hundreds of milliseconds **in visible
+mode only** — headless mode skips mouse interpolation entirely
+(`browser.ts:771-774`). None of this is a plausible source of multi-second
+slowness on its own.
+
+The far more likely dominant cost, based on evidence already visible in
+this conversation's own traces (`Thinking · step 14` on a simple task),
+is model round-trip count and latency — exactly what the ticket itself
+predicted as the more likely culprit. **This can't be confirmed from here.**
+The concrete, actionable next step: run one real task and read
+`GET /runs/:id` (built in #71) — every `AGENT_STEP` and `TOOL_COMPLETED`
+event already carries `durationMs`. That's real data instead of a guess.
+
+### 4. Real browser torture (20 live tasks) — cannot be produced here
+
+No browser, no model, no scorecard. Fabricating one would be worse than
+saying nothing.
+
+### The one thing worth calling a real finding: the verification engine was invisible to the model
+
+Auditing the execution-vs-reality boundary specifically (item 4's stated
+focus) surfaced a genuine gap: `clickToNavigate`'s tool **schema** never
+exposed `expectedOutcome` at all — only `elementId`. So while #70/#72
+wired real verification into the function's *implementation*, the model
+had no way to actually request it, and every click silently used the weak
+"did the URL change" fallback. That fallback catches a click that does
+nothing; it does **not** catch the actual YouTube case, where a wrong
+candidate still navigates to some `/watch?v=X` and the URL genuinely
+changes. The complete loop the ticket asked about — click, verify against
+an explicit expectation, fail, recover — was architecturally present and
+tested in isolation, but never reachable from a real conversation.
+
+**Fixed:** `expectedOutcome` is now a declared parameter on
+`clickToNavigate`'s schema, and the prompt tells the agent to supply one
+specifically when a click is choosing between plausible candidates — "if
+it comes back unverified, that candidate was wrong, read the page again
+and pick a different one."
+
+2 new tests lock down the schema shape itself, since a silently-removed
+property here is exactly how this gap opened in the first place.
+
+155 tests passing (was 148).

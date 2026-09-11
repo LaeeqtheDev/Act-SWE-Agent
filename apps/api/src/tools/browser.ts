@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { verifyAction, verifyInputValue, type ExpectedOutcome, type VerificationResult } from "./verification.js";
 
 // Two modes:
 //
@@ -41,6 +42,51 @@ interface Session {
   page: Page;
   browser: Browser | null; // null when using a persistent Chrome profile
   lastUsed: number;
+}
+
+// Every collectInteractiveElements call gets a fresh generation number, and
+// every id it returns is embedded with it ("4:e3"). This is what makes a
+// stale id STRUCTURALLY impossible to accidentally resolve: navigating (or
+// even just re-collecting without navigating — a React rerender, an
+// infinite-scroll page growing) bumps the generation and re-stamps every
+// element with the new prefix, so an id from an earlier snapshot can never
+// match anything on the page again, not even by coincidence. Without this,
+// "Page A: e0 = a video result" / navigate / "Page B: e0 = something
+// completely different" was a real (if narrow) risk — an id alone doesn't
+// encode which page state it came from.
+const pageGenerations = new WeakMap<Page, number>();
+
+function nextGeneration(p: Page): number {
+  const gen = (pageGenerations.get(p) ?? 0) + 1;
+  pageGenerations.set(p, gen);
+  return gen;
+}
+
+function currentGeneration(p: Page): number {
+  return pageGenerations.get(p) ?? 0;
+}
+
+// Lets the agent react differently to different failures instead of just
+// retrying the same thing blindly — the exact distinction the earlier
+// error-string approach couldn't make. STALE_ELEMENT means "re-read the
+// page", ELEMENT_NOT_FOUND means "that id was never real, don't retry it",
+// TIMEOUT usually means a slow page rather than a wrong target.
+export type FailureReason =
+  | "STALE_ELEMENT"
+  | "ELEMENT_NOT_FOUND"
+  | "NAVIGATION_TIMEOUT"
+  | "VERIFICATION_FAILED"
+  | "UNKNOWN";
+
+function classifyMissingElement(p: Page, elementId: string): FailureReason {
+  const match = elementId.match(/^(\d+):/);
+  if (!match) return "ELEMENT_NOT_FOUND"; // not even shaped like a real id — hallucinated
+  const idGeneration = Number(match[1]);
+  // Strictly less-than, not not-equal: the current generation only advances
+  // forward via nextGeneration(), so any id generation below it is
+  // provably from an earlier page state — that's what "stale" means here,
+  // not a guess.
+  return idGeneration < currentGeneration(p) ? "STALE_ELEMENT" : "ELEMENT_NOT_FOUND";
 }
 
 const sessions = new Map<string, Session>();
@@ -235,11 +281,21 @@ function keyFor(sessionKey?: string): string {
 }
 
 export interface InteractiveElement {
-  selector: string; // a Playwright-native selector (role= or text=) — far more
-                     // robust across page updates than a raw CSS path
+  id: string; // opaque, stable within this page snapshot — never a query
+              // string the model has to construct. See collectInteractiveElements.
   text: string;
   href?: string; // resolved absolute URL, only present for plain links — see
                  // browseWeb below for why this matters
+}
+
+// Every action function below takes an elementId and resolves it to
+// `[data-act-id="..."]` here, in exactly one place. That attribute only
+// exists because collectInteractiveElements stamped it onto the DOM during
+// the most recent read — so an id from a STALE page snapshot (before the
+// last navigation) correctly resolves to nothing rather than silently
+// matching some unrelated element, which raw text/role selectors used to do.
+function locatorFor(p: Page, elementId: string) {
+  return p.locator(`[data-act-id="${elementId}"]`).first();
 }
 
 export async function browseWeb(url: string, sessionKey?: string): Promise<{ title: string; text: string; status: number | null; interactiveElements: InteractiveElement[] }> {
@@ -282,7 +338,9 @@ export async function browseWeb(url: string, sessionKey?: string): Promise<{ tit
     };
   }
 
-  const interactiveElements = await collectInteractiveElements(page);
+  // A genuine navigation: every id from the previous page must become
+  // stale, so this is one of the few places that bumps the generation.
+  const interactiveElements = await collectInteractiveElements(page, true);
 
   return { title, text: text.slice(0, 900), status: response?.status() ?? 200, interactiveElements };
 }
@@ -295,13 +353,48 @@ export async function browseWeb(url: string, sessionKey?: string): Promise<{ tit
 // better than a raw CSS path would. Extracted so clickToNavigate can return
 // the same shape after a click, letting the agent keep working from the new
 // page without a separate browseWeb round-trip.
-async function collectInteractiveElements(p: Page): Promise<InteractiveElement[]> {
-  return p.evaluate(() => {
+// bumpGeneration: only TRUE when the page actually navigated or its DOM was
+// wholly replaced. This distinction is load-bearing and was a real bug:
+// every collection used to bump the generation, so a non-navigating action
+// like typeInto — which re-collects to return fresh elements — invalidated
+// EVERY id the model was still holding, including the search button it
+// was about to click next. The model got STALE_ELEMENT, re-read the page,
+// tried again, and looped: the observed "typed the query but never pressed
+// Enter", plus a large share of the slowness. Typing into a box doesn't
+// change any other element's identity, so it must not renumber them.
+async function collectInteractiveElements(p: Page, bumpGeneration = false): Promise<InteractiveElement[]> {
+  const gen = bumpGeneration ? nextGeneration(p) : currentGeneration(p) || nextGeneration(p);
+  return p.evaluate((generation) => {
+    // Every collected element gets a stable data-act-id attribute STAMPED
+    // DIRECTLY ONTO THE DOM. That id is the ONLY thing the model ever sees
+    // or sends back — never a hand-built Playwright query string.
+    //
+    // This replaces an entire class of bugs that kept recurring: role=
+    // selectors matching the wrong element (a form field labelled "Search"
+    // matching a footer link with "Search" in its text), truncated names
+    // never matching anything, Playwright normalizing whitespace so a raw
+    // innerText selector could never match, hrefs drifting or carrying
+    // kilobytes of tracking data. An attribute selector doesn't have any
+    // of those failure modes — it either exists on the page or it doesn't.
     const els = Array.from(document.querySelectorAll('a, button, input, textarea, select, [role="button"], [role="link"], [role="tab"], [contenteditable="true"]'));
-    const results: { selector: string; text: string; href?: string }[] = [];
+    const results: { id: string; text: string; href?: string }[] = [];
+
+    // Start numbering past the highest id already handed out at this
+    // generation. Without this, `counter` would restart at 0 on every
+    // collection and a newly-inserted element could be assigned an id that
+    // a retained element is still using — reintroducing exactly the
+    // wrong-element-execution bug this whole change exists to remove.
+    let counter = 0;
+    for (const seen of Array.from(document.querySelectorAll("[data-act-id]"))) {
+      const existing = seen.getAttribute("data-act-id") ?? "";
+      const match = existing.match(new RegExp(`^${generation}:e(\\d+)$`));
+      if (match) counter = Math.max(counter, Number(match[1]) + 1);
+    }
+
     for (const el of els) {
       const rect = el.getBoundingClientRect();
       if (rect.width === 0 || rect.height === 0) continue; // skip hidden elements
+
       let label =
         el.getAttribute("aria-label") ||
         (el as HTMLElement).innerText?.trim() ||
@@ -310,101 +403,86 @@ async function collectInteractiveElements(p: Page): Promise<InteractiveElement[]
         el.getAttribute("name") ||
         el.getAttribute("title") ||
         "";
+      label = label.replace(/\s+/g, " ").trim(); // collapse newlines for a readable label
 
       const tag = el.tagName.toLowerCase();
-      const role = el.getAttribute("role");
       const isTextInput =
         tag === "textarea" ||
         el.getAttribute("contenteditable") === "true" ||
         (tag === "input" && !["hidden", "submit", "button", "checkbox", "radio"].includes((el as HTMLInputElement).type));
 
       // An empty <textarea> — a notepad, a comment box, a message field —
-      // has no label, no placeholder, and no name. It was being skipped
-      // entirely, so the agent could see the page but never saw anywhere to
-      // type, and would go off searching for a selector instead. Text
-      // inputs now always get an entry, labelled by what they are.
+      // has no label at all. It still needs an id, so it's still
+      // clickable/typeable, just described by what it IS rather than a
+      // label it doesn't have.
       if (!label && !isTextInput) continue;
 
-      let selector: string;
-      let href: string | undefined;
-
-      if (!label && isTextInput) {
-        // Positional selector, since there's nothing to match on by name.
-        // nth() is stable for the common case of one main editor per page.
-        const sameKind = Array.from(document.querySelectorAll(tag === "textarea" ? "textarea" : tag));
-        const index = sameKind.indexOf(el);
-        const editable = el.getAttribute("contenteditable") === "true";
-        results.push({
-          selector: editable ? `[contenteditable="true"] >> nth=${index}` : `${tag} >> nth=${index}`,
-          text: editable ? "text editor area" : `${tag} field (empty)`,
-        });
-        if (results.length >= 25) break;
-        continue;
+      // The id belongs to the ELEMENT, not to its position in this
+      // collection. Previously this assigned `${generation}:e${counter++}`
+      // unconditionally on every pass, which meant the id tracked
+      // collection ORDER — so anything inserted mid-page (a lazily-loaded
+      // ad, a toast, a newly-rendered result) shifted every subsequent
+      // element's id by one. Worse than going stale: an id the model was
+      // holding would still RESOLVE, just to a different element, and the
+      // runtime would report "found it, clicked it, success" while
+      // clicking the wrong thing entirely.
+      //
+      // Reusing an existing attribute makes the mapping stable: a node
+      // keeps its id for as long as it's in the document, and only nodes
+      // that have never been seen get a new one. The generation prefix
+      // still handles the navigation case, where the whole document is
+      // replaced and every old id should stop resolving.
+      const existingId = el.getAttribute("data-act-id");
+      let id: string;
+      if (existingId && existingId.startsWith(`${generation}:`)) {
+        // Same generation and already stamped — this exact node has been
+        // seen before on this page, so it keeps the id the model may
+        // already be holding.
+        id = existingId;
+      } else {
+        // Never seen at this generation: brand new node, or one carrying a
+        // stale id from before a navigation. Either way it needs a fresh
+        // one, numbered past anything already handed out for this
+        // generation so it can't collide with an id still in use.
+        id = `${generation}:e${counter++}`;
+        el.setAttribute("data-act-id", id);
       }
 
-      // Playwright NORMALIZES whitespace when matching accessible names, so
-      // a selector built from raw innerText — which on a YouTube result is
-      // "12:56\nNow playing\nCoke Studio..." — can never match anything.
-      // Every click in the trace failed for exactly this reason. Collapse
-      // all whitespace runs to single spaces before building the selector.
-      label = label.replace(/\s+/g, " ").trim();
-      const trimmed = label.slice(0, 60);
+      const text = label
+        ? label.slice(0, 80)
+        : el.getAttribute("contenteditable") === "true"
+          ? "text editor area"
+          : `${tag} field (empty)`;
 
-      // The label shown to the model is truncated to 60 chars to keep the
-      // payload small — but role=NAME matching is EXACT, so a truncated name
-      // never matches anything. That silently broke every click on any
-      // element with a long label (YouTube video titles, job listings...).
-      // Using the first 40 chars as a substring match (i=case-insensitive)
-      // finds the real element instead.
-      const nameMatch = `/${label.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/i`;
-
-      if (role === "button" || tag === "button") selector = `role=button[name=${nameMatch}]`;
-      else if (tag === "a" || role === "link") {
-        selector = `role=link[name=${nameMatch}]`;
-        // A plain link's destination is just another URL — no reason to
-        // require an approval to "click" it when browseWeb can go straight
-        // there. This is what cuts the unnecessary approval friction for
-        // pure navigation, reserving the gate for things that actually
-        // submit, send, or change something.
+      let href: string | undefined;
+      if (tag === "a") {
         const rawHref = (el as HTMLAnchorElement).href;
         // Real bug found from a live trace: Google Maps (and similar sites)
         // embed hundreds of characters of tracking/encoded data in every
         // link's href. With up to 25 elements on a page, that alone was
-        // several thousand characters — and because "recent" tool results
-        // were kept completely uncapped, a single Maps page could exceed
-        // the entire token budget by itself, no matter how well history was
-        // trimmed. A long href is dropped; the element is still clickable
-        // via its selector, which doesn't carry this cost.
+        // several thousand characters, and "recent" tool results were kept
+        // uncapped, so a single Maps page could exceed the whole token
+        // budget by itself. A long href is dropped; the element is still
+        // clickable via its id either way.
         if (rawHref && !rawHref.startsWith("javascript:") && rawHref.length <= 200) href = rawHref;
-      } else if (tag === "input" || tag === "textarea" || tag === "select" || el.getAttribute("contenteditable") === "true") {
-        // A `text=` selector matches an element's VISIBLE TEXT CONTENT —
-        // which a form field never has. Using it for inputs meant the
-        // selector silently matched some other element containing that word
-        // instead (on Google, the label "Search" matched the "How Search
-        // works" footer LINK), so typing navigated away rather than typing.
-        // Match on the accessible role/name, which is what actually
-        // identifies a field, and fall back to a positional selector.
-        const sameTag = Array.from(document.querySelectorAll(tag));
-        const idx = sameTag.indexOf(el);
-        // Use the element's OWN role when it declares one. Google's search
-        // box is a <textarea role="combobox">, so hardcoding "textbox" here
-        // produced a selector that matched nothing at all — which is
-        // exactly why typing silently did nothing on google.com.
-        const explicitRole = el.getAttribute("role");
-        const inputRole = explicitRole || (tag === "select" ? "combobox" : "textbox");
-        selector = label ? `role=${inputRole}[name=${nameMatch}]` : `${tag} >> nth=${idx}`;
-      } else selector = `text=${nameMatch}`;
-      results.push({ selector, text: trimmed, href });
+      }
+
+      results.push({ id, text, href });
       if (results.length >= 25) break; // keep the payload small — see the TPM note above
     }
     return results;
-  });
+  }, gen);
 }
 
 export interface FormFillPayload {
   url?: string;
-  fields: { selector: string; value: string }[];
-  submitSelector?: string;
+  // element ids, captured from the SAME page read that proposed this
+  // action. If the page had to be re-navigated to reach payload.url,
+  // those ids are stale (a fresh page has fresh ids) — handled below by
+  // failing that field explicitly rather than silently acting on the
+  // wrong element.
+  fields: { elementId: string; value: string }[];
+  submitElementId?: string;
 }
 
 // Fills an entire form in one approved action, then optionally submits it.
@@ -413,7 +491,7 @@ export interface FormFillPayload {
 // the button I'll press" — rather than a dozen separate approvals for
 // individual fields, which is unusable in practice. Still fully gated: it
 // only ever runs after the user approves it.
-export async function performFormFill(payload: FormFillPayload, sessionKey?: string): Promise<{ success: boolean; filled: number; submitted: boolean; error?: string }> {
+export async function performFormFill(payload: FormFillPayload, sessionKey?: string): Promise<{ success: boolean; filled: number; submitted: boolean; failureReason?: FailureReason; error?: string }> {
   const { page } = await getSession(keyFor(sessionKey));
   try {
     if (payload.url && page.url() !== payload.url) {
@@ -422,10 +500,20 @@ export async function performFormFill(payload: FormFillPayload, sessionKey?: str
     if (isVisible()) await injectCursorOverlay(page);
 
     let filled = 0;
+    const skipped: string[] = [];
+    const unverified: string[] = [];
     for (const field of payload.fields) {
-      const locator = page.locator(field.selector).first();
+      const locator = locatorFor(page, field.elementId);
       const box = await locator.boundingBox({ timeout: 8_000 }).catch(() => null);
-      if (box) await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+      if (!box) {
+        // Genuinely useful signal: this field's id doesn't exist on the
+        // current page, most likely because navigating to payload.url just
+        // reset every id. Skip it rather than typing into whatever that
+        // stale attribute selector happens to now match.
+        skipped.push(field.elementId);
+        continue;
+      }
+      await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
       await locator.click({ timeout: 8_000 }).catch(() => {});
       // Same guard typeInto already has, which this path was missing:
       // Ctrl+A with nothing focused selects the ENTIRE PAGE, which is
@@ -443,12 +531,18 @@ export async function performFormFill(payload: FormFillPayload, sessionKey?: str
       } else {
         await locator.fill(field.value);
       }
+
+      // Same objective check typeInto uses — did the value actually land,
+      // not just "did fill() throw". A form where three fields silently
+      // didn't take their values is worse than one that visibly failed.
+      const result = await verifyInputValue(page, field.elementId, field.value);
+      if (!result.verified) unverified.push(field.elementId);
       filled++;
     }
 
     let submitted = false;
-    if (payload.submitSelector) {
-      const submit = page.locator(payload.submitSelector).first();
+    if (payload.submitElementId) {
+      const submit = locatorFor(page, payload.submitElementId);
       const box = await submit.boundingBox({ timeout: 8_000 }).catch(() => null);
       if (box) await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
       await submit.click({ timeout: 10_000 });
@@ -456,7 +550,22 @@ export async function performFormFill(payload: FormFillPayload, sessionKey?: str
       submitted = true;
     }
 
-    return { success: true, filled, submitted };
+    return {
+      success: skipped.length === 0 && unverified.length === 0,
+      filled,
+      submitted,
+      ...(skipped.length > 0
+        ? {
+            failureReason: "STALE_ELEMENT" as FailureReason,
+            error: `${skipped.length} field(s) had stale ids and were skipped: ${skipped.join(", ")}. The page likely reloaded — read it again and retry with fresh ids.`,
+          }
+        : unverified.length > 0
+          ? {
+              failureReason: "VERIFICATION_FAILED" as FailureReason,
+              error: `${unverified.length} field(s) don't show the value entered afterward: ${unverified.join(", ")}. The site may have intercepted or reset them.`,
+            }
+          : {}),
+    };
   } catch (err) {
     return { success: false, filled: 0, submitted: false, error: err instanceof Error ? err.message : "form fill failed" };
   }
@@ -465,7 +574,7 @@ export async function performFormFill(payload: FormFillPayload, sessionKey?: str
 export interface BrowserActionPayload {
   url: string;
   action: "click" | "fill";
-  selector: string;
+  elementId: string;
   value?: string;
 }
 
@@ -478,34 +587,99 @@ export interface BrowserActionPayload {
 //
 // Everything that actually SUBMITS, SENDS, POSTS, or APPLIES still goes
 // through proposeAction — that gate is unchanged and non-negotiable.
-export async function clickToNavigate(selector: string, sessionKey?: string): Promise<{ success: boolean; url?: string; title?: string; text?: string; interactiveElements?: InteractiveElement[]; error?: string }> {
+export async function clickToNavigate(
+  elementId: string,
+  sessionKey?: string,
+  expectedOutcome?: ExpectedOutcome
+): Promise<{
+  success: boolean;
+  url?: string;
+  title?: string;
+  text?: string;
+  interactiveElements?: InteractiveElement[];
+  verification?: string;
+  verificationResult?: VerificationResult;
+  failureReason?: FailureReason;
+  error?: string;
+}> {
   const { page } = await getSession(keyFor(sessionKey));
   try {
     if (isVisible()) await injectCursorOverlay(page);
 
-    const locator = page.locator(selector).first();
+    const locator = locatorFor(page, elementId);
     const box = await locator.boundingBox({ timeout: 10_000 }).catch(() => null);
-    if (box) await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+    if (!box) {
+      const reason = classifyMissingElement(page, elementId);
+      const interactiveElements = await collectInteractiveElements(page).catch(() => []);
+      return {
+        success: false,
+        failureReason: reason,
+        error:
+          reason === "STALE_ELEMENT"
+            ? `Element "${elementId}" is from an earlier version of this page — it navigated or reloaded since. Use one of the ids in interactiveElements below, which are current.`
+            : `Element "${elementId}" was never on this page. Use one of the ids in interactiveElements below — never invent one.`,
+        url: page.url(),
+        interactiveElements,
+      };
+    }
+    await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+
+    // Captured BEFORE the click so the result can classify what actually
+    // happened, instead of the agent guessing from a generic "success".
+    const urlBefore = page.url();
 
     await locator.click({ timeout: 10_000 });
-    // Give SPA routing / lazy content a moment to settle before reading.
     await page.waitForLoadState("domcontentloaded", { timeout: 10_000 }).catch(() => {});
     await page.waitForTimeout(120); // brief settle for SPA routing
     if (isVisible()) await injectCursorOverlay(page).catch(() => {});
 
     const title = await page.title();
     const text = await page.evaluate(() => document.body.innerText);
-    const interactiveElements = await collectInteractiveElements(page);
-    return { success: true, url: page.url(), title, text: text.slice(0, 900), interactiveElements };
+    const urlAfter = page.url();
+    // Only bump the generation if the click ACTUALLY navigated. A click
+    // that opened a menu or toggled something in place leaves every other
+    // element on the page exactly where it was, so renumbering them would
+    // needlessly invalidate ids the model still holds and is about to use.
+    const interactiveElements = await collectInteractiveElements(page, urlAfter !== urlBefore);
+
+    // When the caller supplied an explicit expectation, that's the real
+    // answer to "did this work" — runs through the SAME verifiers used
+    // everywhere else, never bespoke logic per call site. Without one,
+    // fall back to the URL-changed heuristic: cheap, and still catches the
+    // most common case (a click that technically succeeded but did
+    // nothing — a menu opened instead of navigating).
+    let verificationResult: VerificationResult | undefined;
+    let verification: string;
+    if (expectedOutcome) {
+      verificationResult = await verifyAction(page, expectedOutcome);
+      verification = verificationResult.verified
+        ? `Verified: ${verificationResult.check} matches "${verificationResult.expected}".`
+        : `NOT verified: expected ${verificationResult.check} "${verificationResult.expected}", got "${verificationResult.actual}".`;
+    } else {
+      verification =
+        urlAfter !== urlBefore
+          ? `Navigated to ${urlAfter}`
+          : "Page did not navigate — the click may have opened a menu or done nothing. Check interactiveElements for what's actually here now.";
+    }
+
+    return {
+      success: expectedOutcome ? verificationResult!.verified : true,
+      url: urlAfter,
+      title,
+      text: text.slice(0, 900),
+      interactiveElements,
+      verification,
+      verificationResult,
+      ...(expectedOutcome && !verificationResult!.verified ? { failureReason: "VERIFICATION_FAILED" as FailureReason } : {}),
+    };
   } catch (err) {
     // Hand back the CURRENT page's clickable elements on failure. Without
     // this the agent just saw "click failed" with no idea what it could
-    // click instead, so it kept retrying variations of the same broken
-    // selector until it ran out of turns.
+    // click instead, so it kept retrying variations of the same broken id.
     const interactiveElements = await collectInteractiveElements(page).catch(() => []);
     return {
       success: false,
-      error: `Couldn't click "${selector}": ${err instanceof Error ? err.message : "unknown error"}. Pick a selector from interactiveElements below — those are what's actually on the page right now.`,
+      error: `Couldn't click element "${elementId}": ${err instanceof Error ? err.message : "unknown error"}. Pick an id from interactiveElements below — those are what's actually on the page right now.`,
       url: page.url(),
       interactiveElements,
     };
@@ -625,7 +799,7 @@ async function moveTo(p: Page, x: number, y: number): Promise<void> {
 export async function performBrowserAction(
   payload: BrowserActionPayload,
   sessionKey?: string
-): Promise<{ success: boolean; note?: string; error?: string }> {
+): Promise<{ success: boolean; note?: string; failureReason?: FailureReason; error?: string }> {
   const { page } = await getSession(keyFor(sessionKey));
   try {
     if (page.url() !== payload.url) {
@@ -633,15 +807,20 @@ export async function performBrowserAction(
     }
     if (isVisible()) await injectCursorOverlay(page);
 
-    const locator = page.locator(payload.selector).first();
+    const locator = locatorFor(page, payload.elementId);
     const box = await locator.boundingBox({ timeout: 10_000 }).catch(() => null);
-    if (box) {
-      await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+    if (!box) {
+      return {
+        success: false,
+        failureReason: classifyMissingElement(page, payload.elementId),
+        error: `Element "${payload.elementId}" isn't on the page — the id is likely stale from before a navigation.`,
+      };
     }
+    await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
 
     if (payload.action === "click") {
       await locator.click({ timeout: 10_000 });
-      return { success: true, note: `clicked ${payload.selector}` };
+      return { success: true, note: `clicked element ${payload.elementId}` };
     }
     if (payload.action === "fill") {
       await locator.click({ timeout: 10_000 }); // focus the field first, visibly
@@ -652,7 +831,7 @@ export async function performBrowserAction(
       } else {
         await locator.fill(payload.value ?? "");
       }
-      return { success: true, note: `filled ${payload.selector}` };
+      return { success: true, note: `filled element ${payload.elementId}` };
     }
     return { success: false, error: `unknown action: ${payload.action}` };
   } catch (err) {
@@ -751,7 +930,8 @@ export async function goBack(sessionKey?: string): Promise<{ success: boolean; u
   await page.goBack({ waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => {});
   await page.waitForTimeout(250);
   if (isVisible()) await injectCursorOverlay(page).catch(() => {});
-  return { success: true, url: page.url(), interactiveElements: await collectInteractiveElements(page) };
+  // A real navigation, same as browseWeb — old ids must become stale.
+  return { success: true, url: page.url(), interactiveElements: await collectInteractiveElements(page, true) };
 }
 
 // Some things are only obvious visually — a chart, a layout, a CAPTCHA, a
@@ -780,11 +960,19 @@ export async function pressKey(
   const { page } = await getSession(keyFor(sessionKey));
   try {
     if (isVisible()) await injectCursorOverlay(page).catch(() => {});
+    // Enter on a search box usually DOES navigate, so capture the URL
+    // first and only renumber elements if the page genuinely changed.
+    const urlBefore = page.url();
     await page.keyboard.press(key);
     await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
     await page.waitForTimeout(200);
     if (isVisible()) await injectCursorOverlay(page).catch(() => {});
-    return { success: true, url: page.url(), interactiveElements: await collectInteractiveElements(page) };
+    const urlAfter = page.url();
+    return {
+      success: true,
+      url: urlAfter,
+      interactiveElements: await collectInteractiveElements(page, urlAfter !== urlBefore),
+    };
   } catch (err) {
     return { success: false, url: page.url(), interactiveElements: [], error: err instanceof Error ? err.message : "key press failed" };
   }
@@ -802,26 +990,51 @@ export async function pressKey(
 const SENSITIVE_FIELD = /pass(word|code)|\bpin\b|\bcvv\b|\bcvc\b|card.?number|security.?code|secret|otp|2fa|one.?time/i;
 
 export async function typeInto(
-  selector: string,
+  elementId: string,
   text: string,
   sessionKey?: string
-): Promise<{ success: boolean; url?: string; interactiveElements?: InteractiveElement[]; error?: string }> {
+): Promise<{
+  success: boolean;
+  url?: string;
+  interactiveElements?: InteractiveElement[];
+  failureReason?: FailureReason;
+  verificationResult?: VerificationResult;
+  error?: string;
+}> {
   const { page } = await getSession(keyFor(sessionKey));
-
-  if (SENSITIVE_FIELD.test(selector)) {
-    return {
-      success: false,
-      error:
-        "That looks like a password or payment field. Use proposeAction with type form_fill for those — they need the user's explicit approval.",
-    };
-  }
 
   try {
     if (isVisible()) await injectCursorOverlay(page).catch(() => {});
 
-    const locator = page.locator(selector).first();
+    const locator = locatorFor(page, elementId);
     const box = await locator.boundingBox({ timeout: 8_000 }).catch(() => null);
-    if (box) await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+    if (!box) {
+      const reason = classifyMissingElement(page, elementId);
+      const interactiveElements = await collectInteractiveElements(page).catch(() => []);
+      return {
+        success: false,
+        failureReason: reason,
+        error:
+          reason === "STALE_ELEMENT"
+            ? `Element "${elementId}" is from an earlier version of this page — it navigated or reloaded since. Use one of the ids in interactiveElements below, which are current.`
+            : `Element "${elementId}" was never on this page. Use one of the ids in interactiveElements below — never invent one.`,
+        url: page.url(),
+        interactiveElements,
+      };
+    }
+    await moveTo(page, box.x + box.width / 2, box.y + box.height / 2);
+
+    // The password/payment guard runs against the element's TEXT (its
+    // label), captured now that we've resolved it from the page rather
+    // than guessed from a selector string that might not even mention it.
+    const fieldLabel = (await locator.evaluate((el) => (el as HTMLElement).innerText || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").catch(() => "")) || "";
+    if (SENSITIVE_FIELD.test(fieldLabel) || SENSITIVE_FIELD.test(elementId)) {
+      return {
+        success: false,
+        error:
+          "That looks like a password or payment field. Use proposeAction with type form_fill for those — they need the user's explicit approval.",
+      };
+    }
 
     await locator.click({ timeout: 8_000 });
     // Confirms the click actually landed focus on this exact element before
@@ -847,7 +1060,7 @@ export async function typeInto(
       const interactiveElements = await collectInteractiveElements(page).catch(() => []);
       return {
         success: false,
-        error: `Clicked "${selector}" but the page moved focus elsewhere — likely an autocomplete or overlay intercepting it. Try a more specific selector from interactiveElements, or pressKey("Escape") first to dismiss anything covering the field.`,
+        error: `Clicked into that field but the page moved focus elsewhere — likely an autocomplete or overlay intercepting it. Try pressKey("Escape") first to dismiss anything covering the field, then retry.`,
         url: page.url(),
         interactiveElements,
       };
@@ -871,44 +1084,56 @@ export async function typeInto(
     // controlled inputs with an onChange that resets, IME handling, etc.)
     // and pressSequentially won't throw when that happens. Reporting
     // success on an empty field is worse than reporting a clear failure.
-    const landedValue = await locator
-      .evaluate((el) => (el as HTMLInputElement).value ?? (el as HTMLElement).textContent ?? "")
-      .catch(() => "");
-    if (!landedValue.includes(text.slice(0, Math.min(10, text.length)))) {
+    // Runs through the SAME verifyInputValue used by the verification
+    // engine everywhere else — this was the one check that existed before
+    // the engine did, so it's now the engine's implementation, not a
+    // parallel one.
+    const verificationResult = await verifyInputValue(page, elementId, text);
+    if (!verificationResult.verified) {
       const interactiveElements = await collectInteractiveElements(page).catch(() => []);
       return {
         success: false,
-        error: `Typed into "${selector}" but the field doesn't show the text afterward — the site likely intercepted or reset it. Call verifyPageContains to double-check, or try a different field.`,
+        failureReason: "VERIFICATION_FAILED",
+        verificationResult,
+        error: `Typed into that field but it doesn't show the text afterward — the site likely intercepted or reset it. Call verifyPageContains to double-check, or try a different field.`,
         url: page.url(),
         interactiveElements,
       };
     }
 
-    return { success: true, url: page.url(), interactiveElements: await collectInteractiveElements(page) };
+    return {
+      success: true,
+      url: page.url(),
+      interactiveElements: await collectInteractiveElements(page),
+      verificationResult,
+    };
   } catch (err) {
     const interactiveElements = await collectInteractiveElements(page).catch(() => []);
     return {
       success: false,
-      error: `Couldn't type into "${selector}": ${err instanceof Error ? err.message : "unknown error"}. Pick a field from interactiveElements below.`,
+      error: `Couldn't type into that field: ${err instanceof Error ? err.message : "unknown error"}. Pick a field from interactiveElements below.`,
       url: page.url(),
       interactiveElements,
     };
   }
 }
 
-// Waits for something to appear before acting on it. Without this the agent
-// clicks before a page has rendered, gets a failure, and burns a turn
-// retrying what was only ever a timing problem.
+// Waits for something to appear before acting on it. Deliberately takes
+// visible TEXT, not an element id — its entire purpose is waiting for
+// content that doesn't exist in interactiveElements yet, so it can't
+// reference an id from that list. Without this the agent clicks before a
+// page has rendered, gets a failure, and burns a turn retrying what was
+// only ever a timing problem.
 export async function waitForElement(
-  selector: string,
+  text: string,
   sessionKey?: string
 ): Promise<{ success: boolean; error?: string }> {
   const { page } = await getSession(keyFor(sessionKey));
   try {
-    await page.locator(selector).first().waitFor({ state: "visible", timeout: 10_000 });
+    await page.getByText(text, { exact: false }).first().waitFor({ state: "visible", timeout: 10_000 });
     return { success: true };
   } catch {
-    return { success: false, error: `"${selector}" didn't appear within 10s. It may not exist on this page — browseWeb again to see what's actually there.` };
+    return { success: false, error: `"${text}" didn't appear within 10s. It may not exist on this page — browseWeb again to see what's actually there.` };
   }
 }
 
@@ -926,7 +1151,11 @@ export async function verifyPageContains(
   // would always say "not found" for exactly the case this is meant for.
   const found = await page.evaluate((needle: string) => {
     const lowered = needle.toLowerCase();
-    if (document.body.innerText.toLowerCase().includes(lowered)) return true;
+    // Same layout-dependent fallback as verifyTextPresent in
+    // verification.ts — innerText can be empty for elements not yet laid
+    // out; textContent is reliable regardless.
+    const bodyText = document.body.innerText || document.body.textContent || "";
+    if (bodyText.toLowerCase().includes(lowered)) return true;
     const fields = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true']"));
     return fields.some((el) => {
       const value = (el as HTMLInputElement).value ?? (el as HTMLElement).innerText ?? "";

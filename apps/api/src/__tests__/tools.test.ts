@@ -44,3 +44,30 @@ describe("compactHistoryForRequest", () => {
     expect(original[0].role === "tool" ? original[0].content : "").toBe(originalContent);
   });
 });
+
+describe("clickToNavigate exposes expectedOutcome — the actual fix for the execution-vs-reality gap", () => {
+  it("the tool schema declares expectedOutcome as an available parameter", async () => {
+    // This is the specific bug a live-torture audit found: the entire
+    // verification engine (#70) was wired into clickToNavigate's
+    // IMPLEMENTATION, but the tool SCHEMA the model actually sees never
+    // exposed expectedOutcome at all — so every click silently fell back
+    // to "did the URL change," which a wrong-but-still-valid candidate
+    // (any other video on YouTube) trivially satisfies. If this property
+    // is ever removed from the schema, that gap reopens silently.
+    const { getTools } = await import("../tools/index.js");
+    const clickTool = getTools().find((t) => t.name === "clickToNavigate");
+    expect(clickTool, "clickToNavigate must be a registered tool").toBeDefined();
+
+    const props = (clickTool!.inputSchema as { properties?: Record<string, unknown> }).properties;
+    expect(props, "clickToNavigate must declare its input properties").toBeDefined();
+    expect(props).toHaveProperty("expectedOutcome");
+  });
+
+  it("expectedOutcome only accepts the two verifier types the engine actually implements", async () => {
+    const { getTools } = await import("../tools/index.js");
+    const clickTool = getTools().find((t) => t.name === "clickToNavigate");
+    const props = (clickTool!.inputSchema as { properties: Record<string, { properties?: Record<string, { enum?: string[] }> } > }).properties;
+    const typeEnum = props.expectedOutcome.properties?.type?.enum;
+    expect(typeEnum).toEqual(["url", "text-present"]);
+  });
+});

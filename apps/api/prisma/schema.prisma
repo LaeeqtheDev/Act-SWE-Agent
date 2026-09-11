@@ -66,10 +66,32 @@ model AgentAction {
   // conversation continues naturally instead of going dead after approval.
   conversationId String?
   type           String    @default("investigation") // investigation | rollback | restart_pod | scale | browser_action | file_edit | shell_command | web_search
-  status         String    @default("pending")        // pending | approved | rejected | completed
+  // pending -> approved -> executing -> succeeded | failed | unknown
+  // pending -> rejected | expired
+  // failed -> approved (retryAction reuses this same row/id — never a new one)
+  //
+  // UNKNOWN is the state the earlier version of this didn't have: a crash
+  // or timeout between "the external write happened" and "we recorded
+  // that" must never collapse into either FAILED (unsafe — could duplicate
+  // a real submission on retry) or SUCCEEDED (unsafe — could silently skip
+  // a write that never happened). It sits there until something verifies
+  // which one actually occurred.
+  status         String    @default("pending")
   summary        String?
   confidence     Float?
-  evidence       Json?
+  evidence       Json?     // the INPUT payload — what was proposed
+  result         Json?     // the OUTCOME — what actually happened when it ran
+  // Set the instant a row is atomically claimed for execution (approved ->
+  // executing). If a process crashes between claiming and finishing, this
+  // timestamp is what lets a later request detect "this has been
+  // 'executing' for way too long" and reclassify it as UNKNOWN instead of
+  // leaving it claimed forever or letting a second request execute it too.
+  executingSince DateTime?
+  // How many times this logical action has actually been executed — not
+  // how many rows exist. A retry reuses the SAME actionId and increments
+  // this, rather than creating a new action that the system can't connect
+  // back to the original attempt.
+  attempts       Int       @default(0)
   createdAt      DateTime  @default(now())
   resolvedAt     DateTime?
 }
@@ -204,6 +226,38 @@ model Event {
 // same permission gate on writes), just triggered by a scheduler instead of
 // a person typing. userId is null in self-host; scoped per-user in hosted
 // mode so one person's workflow never runs as someone else's account.
+// One row per agent invocation — a chat turn or a workflow run. Events are
+// the source of truth; the pretty timeline (docs/CHANGELOG #71) is derived
+// from these, never the other way around.
+model AgentRun {
+  id             String     @id @default(uuid())
+  conversationId String?
+  userId         String?
+  startedAt      DateTime   @default(now())
+  completedAt    DateTime?
+  status         String     @default("running") // running | completed | failed
+  events         RunEvent[]
+
+  @@index([conversationId])
+}
+
+model RunEvent {
+  id            String   @id @default(uuid())
+  runId         String
+  run           AgentRun @relation(fields: [runId], references: [id])
+  timestamp     DateTime @default(now())
+  // RUN_STARTED | AGENT_STEP | TOOL_STARTED | TOOL_COMPLETED | VERIFICATION
+  // | APPROVAL | RETRY | RUN_COMPLETED | RUN_FAILED
+  type          String
+  tool          String?
+  durationMs    Int?
+  status        String? // SUCCESS | FAILED
+  failureReason String?
+  note          String? // short human-readable detail, never raw page content
+
+  @@index([runId])
+}
+
 model Workflow {
   id                 String        @id @default(uuid())
   userId             String?

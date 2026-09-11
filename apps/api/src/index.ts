@@ -6,7 +6,7 @@ import multer from "multer";
 import fs from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import { eventQueue } from "./queue.js";
-import { investigateIncident, performAction } from "./agent.js";
+import { investigateIncident, performAction, retryAction } from "./agent.js";
 import { getProvider, OPENAI_COMPATIBLE_PRESETS, ANTHROPIC_MODELS, isPremiumModel } from "./providers/index.js";
 import { createConversation, listConversations, getConversationMessages, sendMessage, renameConversation, deleteConversation, deleteEmptyConversations } from "./chat.js";
 import { getProviderSettings, saveProviderSettings } from "./settings.js";
@@ -18,6 +18,8 @@ import { initScheduler, listWorkflows, createWorkflow, updateWorkflow, deleteWor
 import { listNotifications, unreadCount, markRead, markAllRead } from "./notifications.js";
 import { metricsMiddleware, renderMetrics, metricsContentType } from "./metrics.js";
 import { getProgress } from "./progress.js";
+import { getRunTimeline } from "./runs.js";
+import { isApprovalExpired } from "./action-lifecycle.js";
 import { buildAuthUrl, handleCallback, listConnections, disconnect, type Service } from "./connections.js";
 import { storeUploadedFile, getReceiptFile } from "./storage.js";
 import { exportTrainingDataJsonl, countEligibleConversations } from "./fine-tuning.js";
@@ -817,14 +819,62 @@ app.get("/actions/:id", async (req, res) => {
   res.json(action);
 });
 
+// The structured event trail for one agent run (#71). Returns both the raw
+// events and a pre-rendered chronological timeline — the timeline is
+// GENERATED from the events, never the other way around, so it can never
+// drift from what actually happened.
+app.get("/runs/:id", async (req, res) => {
+  const timeline = await getRunTimeline(String(req.params.id));
+  if (!timeline) return res.status(404).json({ error: "run not found" });
+  res.json(timeline);
+});
+
 app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
   try {
-    await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "approved" } });
+    const action = await prisma.agentAction.findUnique({ where: { id: req.params.id } });
+    if (!action) return res.status(404).json({ error: "action not found" });
+
+    // A pending approval that's sat untouched too long is treated as
+    // expired rather than staying approvable forever — see
+    // action-lifecycle.ts for why. Only PENDING actions are checked;
+    // approving an already-approved/executing/terminal one is a different,
+    // separate refusal that performAction itself already handles.
+    if (action.status === "pending" && isApprovalExpired(action.createdAt)) {
+      await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "expired" } });
+      return res.status(400).json({ error: "This approval expired before it was acted on. Propose it again if you still want it done." });
+    }
+
+    // Torture-testing the approval double-click scenario found this: the
+    // update below was UNCONDITIONAL — it blindly set status="approved"
+    // no matter what the row's current status actually was. A stray or
+    // replayed /approve call on an already-rejected, already-succeeded, or
+    // currently-executing action would silently flip it back to
+    // "approved", making it eligible to run again. Conditioning this on
+    // status="pending" (the only state approval is legitimate from) closes
+    // that, and doing it via updateMany rather than update makes a genuine
+    // double-click race-safe too: only one of two simultaneous approvals
+    // can match count 1.
+    const claim = await prisma.agentAction.updateMany({ where: { id: req.params.id, status: "pending" }, data: { status: "approved" } });
+    if (claim.count === 0) {
+      return res.status(400).json({ error: `This action is ${action.status}, not pending — it can't be approved from that state.` });
+    }
     const result = await performAction(String(req.params.id));
     res.json({ approved: true, result });
   } catch (err) {
     console.error("[actions] approve failed:", err);
     res.status(400).json({ error: err instanceof Error ? err.message : "approval failed" });
+  }
+});
+
+// A FAILED action can be retried — same actionId, never a new row — but
+// nothing else can. See action-lifecycle.ts's canRetry for exactly why
+// UNKNOWN and SUCCEEDED are refused here.
+app.post("/actions/:id/retry", writeLimiter, async (req, res) => {
+  try {
+    const result = await retryAction(String(req.params.id));
+    res.json({ retried: true, result });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : "retry failed" });
   }
 });
 

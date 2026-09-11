@@ -8,6 +8,7 @@ import { setProgress, clearProgress, describeTool } from "./progress.js";
 import { checkAndIncrementUsage, UsageLimitError, isPleasantry, chargeExtraSteps } from "./usage.js";
 import { detectToolFailure, reportAgentIncident } from "./agent-incidents.js";
 import { toolCallsTotal, chatMessagesTotal } from "./metrics.js";
+import { startRun, recordEvent, completeRun, type RunEventInput } from "./runs.js";
 
 const prisma = new PrismaClient();
 
@@ -27,19 +28,43 @@ RULES, in priority order:
 2. Act, don't describe. Loading a page is step one. "Play X" means: go to the site, typeInto its search
    box, pressKey "Enter", then OPEN the result. If that result has an href in interactiveElements,
    browseWeb it — a YouTube watch URL plays on load and is far more reliable than clicking a thumbnail.
-   Only clickToNavigate when there's genuinely no href. If a click fails twice, stop clicking and use an
-   href instead — repeating a failing click just burns your budget.
+   Only clickToNavigate when there's genuinely no href.
+2b. When multiple candidates could plausibly be the right one (several videos matching a song title,
+    several search results, several similarly-named links), the URL changing is NOT enough proof you got
+    the right one — a wrong candidate still navigates somewhere. Pass expectedOutcome to clickToNavigate:
+    {type:"url", value:"/watch"} for opening a video, or {type:"text-present", value:"..."} to confirm
+    the actual title/content you expected shows up. If it comes back unverified, that candidate was
+    wrong — read the page again and pick a different one, don't just report success because the click
+    itself didn't error.
 3. "Thanks"/"ok"/similar = talk, not work. Reply in one line, call no tools.
-4. Never Google-search or web-search for a CSS selector — the fields you need are always already in
-   interactiveElements from your last browseWeb ("textarea field (empty)" = an empty box you can type
-   into). Never navigate to google.com's search box; webSearch exists so you don't have to.
+4. Never Google-search or web-search for how to interact with a page — the fields you need are always
+   already in interactiveElements, identified by a short id like "e3" ("textarea field (empty)" = an
+   empty box you can type into). Pass that id directly to clickToNavigate or typeInto; never invent,
+   guess, or hand-build a selector string yourself. Never navigate to google.com's search box; webSearch
+   exists so you don't have to.
 5. Verify before claiming success: after typing/submitting, verifyPageContains a phrase you entered. Not
    found = it didn't work — say so, don't claim otherwise.
+5b. When a click or type fails, its failureReason tells you what actually happened — react to it, don't
+    just retry blindly:
+      STALE_ELEMENT      → the page changed since you read it. browseWeb or clickToNavigate again to get
+                            fresh ids, then use one of those — never reuse the old id.
+      ELEMENT_NOT_FOUND   → that id was never real. Re-check interactiveElements; don't retry the same id.
+      NAVIGATION_TIMEOUT  → the page is probably just slow. waitForElement, then try again once.
+      VERIFICATION_FAILED → the action ran but didn't produce what you expected. Read the page fresh and
+                            reconsider — don't repeat the exact same action hoping for a different result.
+    Never retry the same failing action more than once without changing something — that's how a task
+    burns its whole step budget on one broken step.
 6. Don't re-browse a page you're already on (wastes a step, wipes what you typed). Empty results? Scroll
    first — feeds lazy-load. Wrong page? goBack, don't re-search. Click failed on a dynamic page? waitForElement, retry.
 7. proposeAction never executes anything itself — don't narrate it as done. You'll get a real follow-up
    once it completes.
-8. No emoji. Plain, direct, concise — report what happened, not what you're about to try.`;
+8. No emoji. Plain, direct, concise — report what happened, not what you're about to try.
+9. Genuinely ambiguous requests need a question, not an assumption. "Open the first one" (first of what —
+   you haven't searched anything yet this turn), "send this" (send what, to whom), "use the previous
+   result" (which one, if there were several) — if the context isn't actually in front of you, ask one
+   short question instead of guessing and running with it. This is different from normal judgment calls
+   (picking the most relevant search result, choosing a sensible field to type into) — those you make
+   yourself. The line is: would a reasonable person need to ask this too? If yes, ask.`;
 
 export async function createConversation(title?: string, userId?: string) {
   return prisma.conversation.create({ data: { title, userId } });
@@ -141,6 +166,16 @@ async function runAgentLoop(
     .then((c) => setConnectedServices(c.connected.map((x: { service: string }) => x.service)))
     .catch(() => setConnectedServices([]));
 
+  // A best-effort event trail for this run — never allowed to affect the
+  // actual work it's observing. If it fails to even start, runId falls
+  // back to undefined and every recordEvent call below becomes a no-op via
+  // the guard on emit().
+  const runId = await startRun(conversationId, userId).catch(() => undefined);
+  const emit = (input: Omit<RunEventInput, "runId">) => {
+    if (!runId) return;
+    void recordEvent({ ...input, runId });
+  };
+
   const provider = await getProvider(userId);
   if (!provider) {
     return {
@@ -179,6 +214,7 @@ async function runAgentLoop(
       if (cancelled?.signal.aborted) {
         markSessionCancelled(conversationId);
         closeSession(conversationId).catch(() => {});
+        if (runId) completeRun(runId, "failed").catch(() => {});
         return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
       }
 
@@ -203,6 +239,7 @@ async function runAgentLoop(
       // only, each capped at 60 chars instead of 200) rather than losing
       // the whole task to one over-budget call.
       let result;
+      const stepStart = Date.now();
       try {
         result = await provider.runTurn({
           signal: cancelled?.signal,
@@ -215,6 +252,7 @@ async function runAgentLoop(
         const isTooLarge = status === 413 || /too large|request too large/i.test(String((err as Error)?.message ?? ""));
         if (!isTooLarge) throw err;
 
+        emit({ type: "RETRY", note: "413 — retrying with harder history compaction" });
         result = await provider.runTurn({
           signal: cancelled?.signal,
           system: CHAT_SYSTEM_PROMPT + budgetNote,
@@ -222,6 +260,7 @@ async function runAgentLoop(
           history: compactHistoryForRequest(history, 1, 60),
         });
       }
+      emit({ type: "AGENT_STEP", durationMs: Date.now() - stepStart, status: "SUCCESS" });
 
       if (result.toolCalls.length === 0) {
         // Some models occasionally write out what a tool call would look
@@ -236,6 +275,7 @@ async function runAgentLoop(
           /(browserPayload|formPayload|slackPayload|notionPayload|filePayload|shellPayload)/.test(result.text ?? "");
 
         if (looksLikeLeakedToolCall && turn < maxTurns - 1) {
+          emit({ type: "RETRY", note: "leaked JSON tool call instead of a real one" });
           // AgentMessage only has user/assistant/tool roles — no system —
           // so the correction rides in as a synthetic tool result, which
           // models already treat as actionable feedback from the previous
@@ -275,16 +315,52 @@ async function runAgentLoop(
         // Include the actual target (URL, query, text) so the live step is
         // inspectable while it runs, not just a generic label.
         const input = call.input as Record<string, unknown>;
-        const target = input.url ?? input.query ?? input.text ?? input.selector ?? input.channel;
+        const target = input.url ?? input.query ?? input.text ?? input.elementId ?? input.channel;
         setProgress(
           conversationId,
           stepsUsed,
           describeTool(call.name),
           typeof target === "string" ? target.slice(0, 120) : undefined
         );
+        emit({ type: "TOOL_STARTED", tool: call.name });
+        const toolStart = Date.now();
         const output = await runTool(call.name, call.input, { conversationId, userId, signal: cancelled?.signal });
+        const toolDuration = Date.now() - toolStart;
         detectToolFailure(call.name, output).catch(() => {});
-        toolCallsTotal.inc({ tool: call.name, outcome: output && typeof output === "object" && "error" in output ? "error" : "success" });
+        const isError = !!(output && typeof output === "object" && ("error" in output || (output as { success?: boolean }).success === false));
+        toolCallsTotal.inc({ tool: call.name, outcome: isError ? "error" : "success" });
+        emit({
+          type: "TOOL_COMPLETED",
+          tool: call.name,
+          durationMs: toolDuration,
+          status: isError ? "FAILED" : "SUCCESS",
+          failureReason: (output as { failureReason?: string } | null)?.failureReason,
+        });
+
+        // Every action function that ran through the verification engine
+        // (#70) attaches its result here — surface it as its own event
+        // rather than burying it inside the tool-completed record, since
+        // "the click executed" and "the click achieved what was asked" are
+        // deliberately different questions with different answers.
+        const verification = (output as { verificationResult?: { verified: boolean; check: string } } | null)?.verificationResult;
+        if (verification) {
+          emit({
+            type: "VERIFICATION",
+            tool: call.name,
+            status: verification.verified ? "SUCCESS" : "FAILED",
+            note: verification.check,
+          });
+        }
+
+        // proposeAction's own output IS the "approval required" moment —
+        // detected the same way verification is, from the shape of what
+        // came back, rather than threading a runId all the way down into
+        // tools/index.ts for one call site.
+        const proposal = output as { proposed?: boolean; actionId?: string } | null;
+        if (proposal?.proposed) {
+          emit({ type: "APPROVAL", note: "APPROVAL REQUIRED", tool: proposal.actionId });
+        }
+
         return { call, output };
       };
 
@@ -335,6 +411,7 @@ async function runAgentLoop(
     if (cancelled?.signal.aborted || (err as { name?: string })?.name === "AbortError") {
       markSessionCancelled(conversationId);
       closeSession(conversationId).catch(() => {});
+      if (runId) completeRun(runId, "failed").catch(() => {});
       return { reply: "Stopped.", toolTrace, provider: `${provider.name}/${provider.model}` };
     }
     console.error("[chat] tool-calling loop failed:", err);
@@ -348,6 +425,7 @@ async function runAgentLoop(
   }
 
   clearProgress(conversationId);
+  if (runId) completeRun(runId, finalText ? "completed" : "failed").catch(() => {});
   await prisma.chatMessage.create({ data: { conversationId, role: "assistant", content: finalText } });
 
   // The first step was already charged up front; bill whatever else the

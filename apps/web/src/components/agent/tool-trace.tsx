@@ -29,7 +29,7 @@ function summarise(entry: TraceEntry): string {
   const input = entry.input as Record<string, unknown> | undefined;
   if (!input) return "";
   // Show the most useful field per tool, not a JSON blob.
-  const key = input.query ?? input.url ?? input.text ?? input.selector ?? input.direction ?? input.key;
+  const key = input.query ?? input.url ?? input.text ?? input.elementId ?? input.direction ?? input.key;
   return typeof key === "string" ? key.slice(0, 70) : "";
 }
 

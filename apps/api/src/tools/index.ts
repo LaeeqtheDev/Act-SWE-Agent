@@ -97,7 +97,7 @@ const baseTools: ToolDef[] = [
   {
     name: "browseWeb",
     description:
-      "Open a URL, read its text, and get clickable elements with selectors and hrefs. Uses your logged-in Chrome (Gmail, Calendar, Docs, LinkedIn, Slack) if CHROME_USER_DATA_DIR is set; otherwise a logged-out browser.",
+      "Open a URL, read its text, and get a list of clickable/typeable elements, each with a short id and an href when it's a link. Uses your logged-in Chrome (Gmail, Calendar, Docs, LinkedIn, Slack) if CHROME_USER_DATA_DIR is set; otherwise a logged-out browser.",
     inputSchema: {
       type: "object",
       properties: { url: { type: "string" } },
@@ -107,24 +107,34 @@ const baseTools: ToolDef[] = [
   {
     name: "clickToNavigate",
     description:
-      "Click a button, tab, or link that only navigates or reveals content (no href to browseWeb directly to). Returns the new page's text and elements.",
+      "Click an element by its id from a prior browseWeb/clickToNavigate interactiveElements list (no href to browseWeb directly to). Without expectedOutcome, success is only 'did the URL change' — which is NOT enough when several candidates could all plausibly be the right one (several videos matching a song title, several search results). Pass expectedOutcome whenever the click is choosing between similar candidates, so a click that navigates to the WRONG one is actually caught instead of reported as success.",
     inputSchema: {
       type: "object",
-      properties: { selector: { type: "string", description: "A selector from a prior browseWeb/clickToNavigate interactiveElements list." } },
-      required: ["selector"],
+      properties: {
+        elementId: { type: "string", description: "An id from a prior interactiveElements list, e.g. \"e3\" — never invent one." },
+        expectedOutcome: {
+          type: "object",
+          description: "What should be true if this was the RIGHT candidate. e.g. {type:\"url\", value:\"/watch\"} for opening a specific video, or {type:\"text-present\", value:\"the title you expect\"}.",
+          properties: {
+            type: { type: "string", enum: ["url", "text-present"] },
+            value: { type: "string" },
+          },
+        },
+      },
+      required: ["elementId"],
     },
   },
   {
     name: "typeInto",
     description:
-      "Type text into a field — a search box, a filter, a message box. No approval needed: typing changes nothing on its own, it's the submit that matters. Follow with pressKey('Enter') or clickToNavigate on the submit button. Refuses password and payment fields, which must go through proposeAction instead.",
+      "Type text into a field by its id from interactiveElements — a search box, a filter, a message box. No approval needed: typing changes nothing on its own, it's the submit that matters. Follow with pressKey('Enter') or clickToNavigate on the submit button. Refuses password and payment fields, which must go through proposeAction instead.",
     inputSchema: {
       type: "object",
       properties: {
-        selector: { type: "string", description: "A selector from interactiveElements." },
+        elementId: { type: "string", description: "An id from interactiveElements, e.g. \"e3\"." },
         text: { type: "string" },
       },
-      required: ["selector", "text"],
+      required: ["elementId", "text"],
     },
   },
   {
@@ -140,11 +150,11 @@ const baseTools: ToolDef[] = [
   {
     name: "waitForElement",
     description:
-      "Wait for an element to appear before acting on it. Use when a page loads content dynamically and a click just failed — it's usually a timing problem, not a missing element.",
+      "Wait for text to appear before acting on it. Use when a page loads content dynamically and a click just failed — it's usually a timing problem, not a missing element. Pass the visible text you're waiting for, not an id (it isn't in interactiveElements yet).",
     inputSchema: {
       type: "object",
-      properties: { selector: { type: "string" } },
-      required: ["selector"],
+      properties: { text: { type: "string", description: "Visible text to wait for, e.g. \"Sign in\"." } },
+      required: ["text"],
     },
   },
   {
@@ -200,7 +210,7 @@ const baseTools: ToolDef[] = [
           properties: {
             url: { type: "string" },
             action: { type: "string", enum: ["click", "fill"] },
-            selector: { type: "string", description: "A selector from a prior browseWeb call's interactiveElements — never guess a raw CSS selector." },
+            elementId: { type: "string", description: "An id from a prior browseWeb call's interactiveElements — never invent one." },
             value: { type: "string" },
           },
         },
@@ -211,13 +221,13 @@ const baseTools: ToolDef[] = [
             url: { type: "string" },
             fields: {
               type: "array",
-              description: "Each field's selector (from interactiveElements) and the value to enter. Use getUserProfile first so these are the user's real details.",
+              description: "Each field's id (from interactiveElements) and the value to enter. Use getUserProfile first so these are the user's real details.",
               items: {
                 type: "object",
-                properties: { selector: { type: "string" }, value: { type: "string" } },
+                properties: { elementId: { type: "string" }, value: { type: "string" } },
               },
             },
-            submitSelector: { type: "string", description: "Optional — the submit/apply button to click after filling." },
+            submitElementId: { type: "string", description: "Optional — the id of the submit/apply button to click after filling." },
           },
         },
         slackPayload: {
@@ -494,13 +504,17 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
         // Session key = conversation id, so parallel chats and scheduled
         // workflows each drive their own browser window instead of fighting
         // over one shared tab.
-        return await clickToNavigate(input.selector as string, ctx.conversationId);
+        return await clickToNavigate(
+          input.elementId as string,
+          ctx.conversationId,
+          input.expectedOutcome as { type: "url" | "text-present"; value: string } | undefined
+        );
       } catch (err) {
         return { error: err instanceof Error ? err.message : "click failed" };
       }
     case "typeInto":
       try {
-        return await typeInto(input.selector as string, input.text as string, ctx.conversationId);
+        return await typeInto(input.elementId as string, input.text as string, ctx.conversationId);
       } catch (err) {
         return { error: err instanceof Error ? err.message : "typing failed" };
       }
@@ -512,7 +526,7 @@ export async function runTool(name: string, input: Record<string, unknown>, ctx:
       }
     case "waitForElement":
       try {
-        return await waitForElement(input.selector as string, ctx.conversationId);
+        return await waitForElement(input.text as string, ctx.conversationId);
       } catch (err) {
         return { error: err instanceof Error ? err.message : "wait failed" };
       }
