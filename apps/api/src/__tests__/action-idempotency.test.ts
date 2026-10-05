@@ -227,14 +227,14 @@ describe("torture: 10 simultaneous claims on the same action", () => {
     // 'approved'` — the row can only be in "approved" once, so only the
     // first conditional update to reach it can possibly match.
     let claimed = false;
-    prismaMock.agentAction.findUnique.mockImplementation(async () =>
-      fakeAction({ status: claimed ? "executing" : "approved" }) as never
+    prismaMock.agentAction.findUnique.mockImplementation((async () =>
+      fakeAction({ status: claimed ? "executing" : "approved" })) as never
     );
-    prismaMock.agentAction.updateMany.mockImplementation(async () => {
+    prismaMock.agentAction.updateMany.mockImplementation((async () => {
       if (claimed) return { count: 0 };
       claimed = true;
       return { count: 1 };
-    });
+    }) as never);
     prismaMock.incident.findUnique.mockResolvedValue({ id: "incident_1", service: { name: "orders-api" } } as never);
     prismaMock.agentAction.update.mockResolvedValue(fakeAction({ status: "succeeded" }) as never);
 

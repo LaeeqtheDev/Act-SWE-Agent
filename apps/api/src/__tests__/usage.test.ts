@@ -27,6 +27,8 @@ function fakeUser(overrides: Partial<{ tasksUsed: number; plan: string; periodSt
     plan: "free",
     tasksUsed: 0,
     periodStart: new Date(),
+    stripeCustomerId: null,
+    stripeSubscriptionId: null,
     createdAt: new Date(),
     ...overrides,
   };

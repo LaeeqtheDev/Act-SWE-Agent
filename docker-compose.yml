@@ -44,8 +44,6 @@ services:
     depends_on:
       - postgres
       - redis
-    volumes:
-      - ./apps/api/src:/app/apps/api/src
 
   # Sprint 4: the BullMQ worker as its own always-on container, separate from
   # the API process -- this is what makes event processing genuinely
@@ -54,7 +52,7 @@ services:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
-    command: ["node_modules/.bin/tsx", "src/worker.ts"]
+    command: ["pnpm", "start:worker"]
     environment:
       DATABASE_URL: postgresql://postgres:devpassword@postgres:5432/sentinelops?schema=public
       REDIS_HOST: redis
@@ -68,13 +66,13 @@ services:
     depends_on:
       - postgres
       - redis
-    volumes:
-      - ./apps/api/src:/app/apps/api/src
 
   web:
     build:
       context: .
       dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:4000
     ports:
       - "3000:3000"
     environment:
@@ -82,8 +80,6 @@ services:
       NEXT_PUBLIC_API_URL: http://localhost:4000
     depends_on:
       - api
-    volumes:
-      - ./apps/web/src:/app/apps/web/src
 
   # --- Sprint 11: Observability (optional) ---
   # Not started by a plain `docker compose up`. Run with:

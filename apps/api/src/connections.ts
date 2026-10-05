@@ -154,31 +154,28 @@ export async function handleCallback(service: Service, code: string, state: stri
       : ((data.workspace_name as string) ?? "Notion workspace");
 
   const userId = check.userId;
-  await prisma.connection.upsert({
-    where: { userId_service: { userId: userId ?? null, service } },
-    create: {
-      userId,
-      service,
-      accessToken: encrypt(accessToken),
-      refreshToken: data.refresh_token ? encrypt(data.refresh_token as string) : null,
-      workspaceName,
-      scopes: cfg.scopes || null,
-    },
-    update: {
-      accessToken: encrypt(accessToken),
-      refreshToken: data.refresh_token ? encrypt(data.refresh_token as string) : null,
-      workspaceName,
-    },
-  });
+  // Prisma's compound-unique selectors can't match a null userId (self-host
+  // mode), so look the row up with findFirst and update/create explicitly.
+  const existing = await prisma.connection.findFirst({ where: { userId: userId ?? null, service } });
+  const tokens = {
+    accessToken: encrypt(accessToken),
+    refreshToken: data.refresh_token ? encrypt(data.refresh_token as string) : null,
+    workspaceName,
+  };
+  if (existing) {
+    await prisma.connection.update({ where: { id: existing.id }, data: tokens });
+  } else {
+    await prisma.connection.create({
+      data: { userId: userId ?? null, service, scopes: cfg.scopes || null, ...tokens },
+    });
+  }
 
   return { workspaceName };
 }
 
 // Server-side only. Never expose this over HTTP.
 export async function getToken(service: Service, userId?: string): Promise<string | null> {
-  const conn = await prisma.connection.findUnique({
-    where: { userId_service: { userId: userId ?? null, service } },
-  });
+  const conn = await prisma.connection.findFirst({ where: { userId: userId ?? null, service } });
   if (!conn) return null;
   try {
     return decrypt(conn.accessToken);
@@ -245,7 +242,5 @@ export async function listConnections(userId?: string) {
 }
 
 export async function disconnect(service: Service, userId?: string): Promise<void> {
-  await prisma.connection
-    .delete({ where: { userId_service: { userId: userId ?? null, service } } })
-    .catch(() => {});
+  await prisma.connection.deleteMany({ where: { userId: userId ?? null, service } });
 }

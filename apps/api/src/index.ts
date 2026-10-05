@@ -265,7 +265,7 @@ app.post("/billing/pending/:id/:decision", async (req, res) => {
   if (decision !== "approved" && decision !== "rejected") {
     return res.status(400).json({ error: "decision must be 'approved' or 'rejected'" });
   }
-  const payment = await reviewPendingPayment(req.params.id, decision);
+  const payment = await reviewPendingPayment(String(req.params.id), decision);
   res.json(payment);
 });
 
@@ -273,7 +273,7 @@ app.post("/billing/pending/:id/:decision", async (req, res) => {
 // approving — admin-secret gated, same as the rest of the review endpoints.
 app.get("/billing/receipts/:id", async (req, res) => {
   if (!requireAdmin(req, res)) return;
-  const payment = await getPayment(req.params.id);
+  const payment = await getPayment(String(req.params.id));
   if (!payment) return res.status(404).json({ error: "not found" });
   try {
     const { buffer, contentType } = await getReceiptFile(payment.receiptPath);
@@ -331,7 +331,7 @@ app.post("/admin/users/:id/plan", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   const plan = req.body?.plan;
   if (plan !== "free" && plan !== "pro") return res.status(400).json({ error: "plan must be 'free' or 'pro'" });
-  res.json(await setUserPlan(req.params.id, plan));
+  res.json(await setUserPlan(String(req.params.id), plan));
 });
 
 // Exports your own real conversation history as fine-tuning-ready JSONL —
@@ -446,7 +446,7 @@ app.get("/agent-incidents", async (req, res) => {
 app.post("/agent-incidents/:id/resolve", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  res.json(await resolveAgentIncident(req.params.id));
+  res.json(await resolveAgentIncident(String(req.params.id)));
 });
 
 // --- Workflows: tasks that repeat on a schedule, unattended ---
@@ -484,28 +484,28 @@ app.patch("/workflows/:id", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
   const { name, prompt, cron, enabled, notifyOnRun, stages } = req.body ?? {};
-  const workflow = await updateWorkflow(String(req.params.id), { name, prompt, cron, enabled, notifyOnRun, stages });
+  const workflow = await updateWorkflow(String(String(req.params.id)), { name, prompt, cron, enabled, notifyOnRun, stages });
   res.json(workflow);
 });
 
 app.delete("/workflows/:id", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  await deleteWorkflow(req.params.id);
+  await deleteWorkflow(String(req.params.id));
   res.json({ deleted: true });
 });
 
 app.post("/workflows/:id/run", chatLimiter, async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  runWorkflowNow(String(req.params.id)).catch((err) => console.error("[workflows] manual run failed:", err));
+  runWorkflowNow(String(String(req.params.id))).catch((err) => console.error("[workflows] manual run failed:", err));
   res.json({ started: true });
 });
 
 app.get("/workflows/:id/runs", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  res.json(await listWorkflowRuns(req.params.id));
+  res.json(await listWorkflowRuns(String(req.params.id)));
 });
 
 // --- Notifications ---
@@ -518,7 +518,7 @@ app.get("/notifications", async (req, res) => {
 app.post("/notifications/:id/read", async (req, res) => {
   const userId = await requireUserIfHosted(req, res);
   if (HOSTED_MODE && !userId) return;
-  res.json(await markRead(req.params.id));
+  res.json(await markRead(String(req.params.id)));
 });
 
 app.post("/notifications/read-all", async (req, res) => {
@@ -567,7 +567,7 @@ app.get("/config", (req, res) => {
 // Polled by the chat UI while a task is running, so the user sees "Opening
 // a page" instead of a static spinner.
 app.get("/chat/conversations/:id/progress", async (req, res) => {
-  res.json(getProgress(String(req.params.id)) ?? { step: 0, activity: null });
+  res.json(getProgress(String(String(req.params.id))) ?? { step: 0, activity: null });
 });
 
 // --- Integrations (Slack, Notion) ---
@@ -628,7 +628,7 @@ app.get("/incidents", async (req, res) => {
 
 app.get("/incidents/:id/events", async (req, res) => {
   const events = await prisma.incidentEvent.findMany({
-    where: { incidentId: req.params.id },
+    where: { incidentId: String(req.params.id) },
     orderBy: { timestamp: "asc" },
   });
   res.json(events);
@@ -716,7 +716,7 @@ app.post("/simulate/pod-crash-loop", async (req, res) => {
 
 app.post("/incidents/:id/resolve", async (req, res) => {
   const incident = await prisma.incident.update({
-    where: { id: req.params.id },
+    where: { id: String(req.params.id) },
     data: { status: "resolved", resolvedAt: new Date() },
   });
 
@@ -742,11 +742,11 @@ app.post("/incidents/:id/investigate", chatLimiter, async (req, res) => {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return; // response already sent (401)
 
-    const result = await investigateIncident(String(req.params.id), userId);
+    const result = await investigateIncident(String(String(req.params.id)), userId);
 
     const action = await prisma.agentAction.create({
       data: {
-        incidentId: req.params.id,
+        incidentId: String(req.params.id),
         type: "investigation",
         status: "completed",
         summary: result.summary,
@@ -757,7 +757,7 @@ app.post("/incidents/:id/investigate", chatLimiter, async (req, res) => {
     });
 
     await prisma.incidentEvent.create({
-      data: { incidentId: req.params.id, message: `AI investigation: ${result.probableCause}` },
+      data: { incidentId: String(req.params.id), message: `AI investigation: ${result.probableCause}` },
     });
 
     res.json({ ...result, actionId: action.id });
@@ -768,7 +768,7 @@ app.post("/incidents/:id/investigate", chatLimiter, async (req, res) => {
 
 app.get("/incidents/:id/actions", async (req, res) => {
   const actions = await prisma.agentAction.findMany({
-    where: { incidentId: req.params.id },
+    where: { incidentId: String(req.params.id) },
     orderBy: { createdAt: "desc" },
   });
   res.json(actions);
@@ -798,7 +798,7 @@ app.post("/incidents/:id/actions", async (req, res) => {
   const { type = "restart_pod", summary, browserPayload } = req.body ?? {};
   const action = await prisma.agentAction.create({
     data: {
-      incidentId: req.params.id,
+      incidentId: String(req.params.id),
       type,
       status: "pending",
       summary: summary ?? `Proposed action: ${type}`,
@@ -812,7 +812,7 @@ app.post("/incidents/:id/actions", async (req, res) => {
 // approved action doesn't render live buttons again after a reload.
 app.get("/actions/:id", async (req, res) => {
   const action = await prisma.agentAction.findUnique({
-    where: { id: String(req.params.id) },
+    where: { id: String(String(req.params.id)) },
     select: { id: true, status: true, type: true, summary: true },
   });
   if (!action) return res.status(404).json({ error: "action not found" });
@@ -824,14 +824,14 @@ app.get("/actions/:id", async (req, res) => {
 // GENERATED from the events, never the other way around, so it can never
 // drift from what actually happened.
 app.get("/runs/:id", async (req, res) => {
-  const timeline = await getRunTimeline(String(req.params.id));
+  const timeline = await getRunTimeline(String(String(req.params.id)));
   if (!timeline) return res.status(404).json({ error: "run not found" });
   res.json(timeline);
 });
 
 app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
   try {
-    const action = await prisma.agentAction.findUnique({ where: { id: req.params.id } });
+    const action = await prisma.agentAction.findUnique({ where: { id: String(req.params.id) } });
     if (!action) return res.status(404).json({ error: "action not found" });
 
     // A pending approval that's sat untouched too long is treated as
@@ -840,7 +840,7 @@ app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
     // approving an already-approved/executing/terminal one is a different,
     // separate refusal that performAction itself already handles.
     if (action.status === "pending" && isApprovalExpired(action.createdAt)) {
-      await prisma.agentAction.update({ where: { id: req.params.id }, data: { status: "expired" } });
+      await prisma.agentAction.update({ where: { id: String(req.params.id) }, data: { status: "expired" } });
       return res.status(400).json({ error: "This approval expired before it was acted on. Propose it again if you still want it done." });
     }
 
@@ -854,11 +854,11 @@ app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
     // that, and doing it via updateMany rather than update makes a genuine
     // double-click race-safe too: only one of two simultaneous approvals
     // can match count 1.
-    const claim = await prisma.agentAction.updateMany({ where: { id: req.params.id, status: "pending" }, data: { status: "approved" } });
+    const claim = await prisma.agentAction.updateMany({ where: { id: String(req.params.id), status: "pending" }, data: { status: "approved" } });
     if (claim.count === 0) {
       return res.status(400).json({ error: `This action is ${action.status}, not pending — it can't be approved from that state.` });
     }
-    const result = await performAction(String(req.params.id));
+    const result = await performAction(String(String(req.params.id)));
     res.json({ approved: true, result });
   } catch (err) {
     console.error("[actions] approve failed:", err);
@@ -871,7 +871,7 @@ app.post("/actions/:id/approve", writeLimiter, async (req, res) => {
 // UNKNOWN and SUCCEEDED are refused here.
 app.post("/actions/:id/retry", writeLimiter, async (req, res) => {
   try {
-    const result = await retryAction(String(req.params.id));
+    const result = await retryAction(String(String(req.params.id)));
     res.json({ retried: true, result });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : "retry failed" });
@@ -880,7 +880,7 @@ app.post("/actions/:id/retry", writeLimiter, async (req, res) => {
 
 app.post("/actions/:id/reject", async (req, res) => {
   const action = await prisma.agentAction.update({
-    where: { id: req.params.id },
+    where: { id: String(req.params.id) },
     data: { status: "rejected", resolvedAt: new Date() },
   });
   res.json(action);
@@ -910,7 +910,7 @@ app.get("/chat/conversations/:id/messages", async (req, res) => {
   try {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return;
-    res.json(await getConversationMessages(req.params.id, userId));
+    res.json(await getConversationMessages(String(req.params.id), userId));
   } catch (err) {
     res.status(404).json({ error: err instanceof Error ? err.message : "conversation not found" });
   }
@@ -932,7 +932,7 @@ app.post("/chat/conversations/:id/messages", chatLimiter, async (req, res) => {
       if (!res.writableEnded) cancelled.abort();
     });
 
-    const result = await sendMessage(String(req.params.id), req.body?.message ?? "", userId, cancelled);
+    const result = await sendMessage(String(String(req.params.id)), req.body?.message ?? "", userId, cancelled);
     if (cancelled.signal.aborted) return; // client is gone; nothing to respond to
     res.json(result);
   } catch (err) {
@@ -946,7 +946,7 @@ app.patch("/chat/conversations/:id", async (req, res) => {
   try {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return;
-    const conversation = await renameConversation(req.params.id, req.body?.title ?? "", userId);
+    const conversation = await renameConversation(String(req.params.id), req.body?.title ?? "", userId);
     res.json(conversation);
   } catch (err) {
     res.status(404).json({ error: err instanceof Error ? err.message : "conversation not found" });
@@ -957,7 +957,7 @@ app.delete("/chat/conversations/:id", async (req, res) => {
   try {
     const userId = await requireUserIfHosted(req, res);
     if (HOSTED_MODE && !userId) return;
-    await deleteConversation(req.params.id, userId);
+    await deleteConversation(String(req.params.id), userId);
     res.json({ deleted: true });
   } catch (err) {
     res.status(404).json({ error: err instanceof Error ? err.message : "conversation not found" });

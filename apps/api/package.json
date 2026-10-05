@@ -5,6 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "start:worker": "tsx src/worker.ts",
+    "check-types": "tsc --noEmit",
     "postinstall": "prisma skills sync || exit 0",
     "worker": "tsx watch src/worker.ts",
     "test": "vitest run",
