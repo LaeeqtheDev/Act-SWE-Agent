@@ -14,7 +14,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
 COPY apps/api/package.json ./apps/api/
 COPY packages/types/package.json ./packages/types/
 
-RUN npm install -g pnpm@9 \
+RUN npm install -g pnpm@11.23.0 \
   && pnpm config set fetch-timeout 300000 \
   && pnpm install --frozen-lockfile --filter api... --filter @sentinelops/types
 
@@ -40,4 +40,4 @@ EXPOSE 4000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD node -e "fetch('http://localhost:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["pnpm", "dev"]
+CMD ["pnpm", "start"]
